@@ -1,0 +1,62 @@
+/**
+ * AgentAdapter — the contract between Collagent Core and any agent runtime.
+ *
+ * The core session model never sees runtime-specific concepts; it only sees
+ * normalized events emitted through the adapter. To make another agent
+ * (Lovable, Cursor, Replit, a custom agent, ...) multiplayer, implement this
+ * interface and register it in `src/adapters/index.js`.
+ *
+ * Normalized event kinds an adapter may emit:
+ *   agent_status  { status: starting|ready|working|idle|exited|error, detail? }
+ *   agent_message { text }
+ *   tool_use      { tool, input }
+ *   tool_result   { tool?, summary, isError? }
+ *   result        { ok, text?, durationMs?, costUsd? }
+ *   error         { message }
+ */
+export class AgentAdapter {
+  constructor(options = {}) {
+    this.options = options;
+    this._listeners = new Set();
+  }
+
+  /** Static metadata about the runtime this adapter drives. */
+  get info() {
+    return { type: 'abstract' };
+  }
+
+  /** Subscribe to normalized agent events (the receiveEvents side). */
+  attach(onEvent) {
+    this._listeners.add(onEvent);
+    return () => this._listeners.delete(onEvent);
+  }
+
+  emit(event) {
+    for (const fn of this._listeners) fn(event);
+  }
+
+  /** Start the underlying agent session. Resolves when the agent is usable. */
+  async createSession() {
+    throw new Error('not implemented');
+  }
+
+  /** Deliver an instruction: { text, from: {id, name} }. */
+  async sendInstruction(_instruction) {
+    throw new Error('not implemented');
+  }
+
+  /** Stop accepting new instructions (queue them) until resume(). */
+  async pause() {
+    this.paused = true;
+  }
+
+  async resume() {
+    this.paused = false;
+  }
+
+  /** Control was handed to another participant; adapters may inform the agent. */
+  async handoff(_info) {}
+
+  /** Tear down the underlying agent session. */
+  async disconnect() {}
+}

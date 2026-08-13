@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Collagent</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #101014; color: #e6e6ea;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid #26262e;
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; color: #b9a0ff; }
+  #presence { display: flex; gap: 12px; flex-wrap: wrap; color: #9a9aa5; }
+  #presence .on::before { content: "● "; color: #5ad48a; }
+  #presence .off::before { content: "○ "; color: #55555f; }
+  #presence .agent::before { content: "● "; color: #b9a0ff; }
+  #join { display: flex; gap: 8px; padding: 24px 16px; }
+  input, button {
+    background: #1a1a21; color: inherit; border: 1px solid #33333d;
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  button { cursor: pointer; background: #2c2440; border-color: #4b3a75; }
+  #feed { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  #feed div { white-space: pre-wrap; word-break: break-word; margin: 2px 0; }
+  .dim { color: #71717c; } .user { color: #7cc7ff; } .agent-msg { color: #d6c7ff; }
+  .tool { color: #e0c368; } .ok { color: #5ad48a; } .err { color: #ff7a7a; }
+  #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #26262e; }
+  #composer input { flex: 1; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>collagent</h1>
+  <span id="sessioninfo" class="dim"></span>
+  <div id="presence"></div>
+</header>
+
+<div id="join">
+  <input id="code" placeholder="session code (e.g. 7FK2P)" maxlength="8" autocapitalize="characters">
+  <input id="name" placeholder="your name">
+  <button id="joinBtn">Join session</button>
+</div>
+
+<div id="feed" class="hidden"></div>
+<div id="composer" class="hidden">
+  <input id="text" placeholder="send an instruction to the shared agent…">
+  <button id="sendBtn">Send</button>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+if (params.get('code')) $('code').value = params.get('code');
+
+let ws, self = null, session = null;
+
+$('joinBtn').onclick = join;
+$('code').onkeydown = (e) => e.key === 'Enter' && join();
+$('name').onkeydown = (e) => e.key === 'Enter' && join();
+$('sendBtn').onclick = send;
+$('text').onkeydown = (e) => e.key === 'Enter' && send();
+
+function join() {
+  const code = $('code').value.trim().toUpperCase();
+  const name = $('name').value.trim() || 'web-viewer';
+  if (!code) return;
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', code, name }));
+  ws.onmessage = (m) => handle(JSON.parse(m.data));
+  ws.onclose = () => addLine('connection closed', 'err');
+}
+
+function handle(msg) {
+  if (msg.type === 'welcome') {
+    self = msg.self; session = msg.session;
+    $('join').classList.add('hidden');
+    $('feed').classList.remove('hidden');
+    $('composer').classList.remove('hidden');
+    renderSession();
+    for (const e of msg.events) renderEvent(e);
+  } else if (msg.type === 'event') {
+    renderEvent(msg.event);
+  } else if (msg.type === 'session') {
+    session = msg.session; renderSession();
+  } else if (msg.type === 'error') {
+    addLine('error: ' + msg.message, 'err');
+  }
+}
+
+function renderSession() {
+  $('sessioninfo').textContent = `session ${session.code} · ${session.status} · mode ${session.mode}`;
+  const el = $('presence');
+  el.innerHTML = '';
+  for (const p of session.participants) {
+    const span = document.createElement('span');
+    span.className = p.connected ? 'on' : 'off';
+    const marks = [p.role === 'host' && 'host', p.id === session.driverId && 'driver'].filter(Boolean);
+    span.textContent = p.name + (marks.length ? ` [${marks.join(',')}]` : '');
+    el.appendChild(span);
+  }
+  const agent = document.createElement('span');
+  agent.className = 'agent';
+  agent.textContent = session.agentType;
+  el.appendChild(agent);
+}
+
+function renderEvent(e) {
+  const d = e.data || {}, who = (e.actor && e.actor.name) || '';
+  switch (e.kind) {
+    case 'instruction': return addLine(`${who} › ${d.text}`, 'user');
+    case 'local_prompt': return addLine(`⌨ host terminal › ${d.text}`, 'user');
+    case 'notice': return addLine(`🔔 ${d.message}`, 'tool');
+    case 'agent_message': return addLine(`⏺ ${d.text}`, 'agent-msg');
+    case 'tool_use': return addLine(`  ⚙ ${d.tool} ${d.input || ''}`, 'tool');
+    case 'tool_result': return addLine(`    └ ${d.summary || ''}`, 'dim');
+    case 'result': return addLine(d.ok ? `✓ turn complete${d.durationMs ? ' in ' + (d.durationMs / 1000).toFixed(1) + 's' : ''}` : '✗ turn failed', d.ok ? 'ok' : 'err');
+    case 'participant_joined': return addLine(`● ${who} joined`, 'ok');
+    case 'participant_left': return addLine(`○ ${who} left`, 'dim');
+    case 'participant_disconnected': return addLine(`○ ${who} disconnected`, 'dim');
+    case 'participant_reconnected': return addLine(`● ${who} reconnected`, 'ok');
+    case 'session_paused': return addLine(`⏸ paused by ${who}`, 'tool');
+    case 'session_resumed': return addLine(`▶ resumed by ${who}`, 'ok');
+    case 'control_transferred': return addLine(`⇄ control handed to ${d.to && d.to.name}`, 'user');
+    case 'mode_changed': return addLine(`⚑ mode: ${d.mode}`, 'user');
+    case 'session_ended': return addLine(`■ session ended by ${who}`, 'err');
+    case 'agent_status':
+      if (d.status === 'working') return addLine('· claude is working…', 'dim');
+      if (d.status === 'ready') return addLine('· claude ready', 'dim');
+      if (d.status === 'exited' || d.status === 'disconnected') return addLine('· agent ' + d.status, 'err');
+      return;
+    case 'error': return addLine('! ' + d.message, 'err');
+    default: return;
+  }
+}
+
+function addLine(text, cls) {
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  $('feed').appendChild(div);
+  $('feed').scrollTop = $('feed').scrollHeight;
+}
+
+function send() {
+  const text = $('text').value.trim();
+  if (!text || !ws) return;
+  ws.send(JSON.stringify({ type: 'instruction', text }));
+  $('text').value = '';
+}
+</script>
+</body>
+</html>

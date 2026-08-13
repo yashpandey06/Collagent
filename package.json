@@ -1,0 +1,24 @@
+{
+  "name": "collagent",
+  "version": "0.2.0",
+  "description": "Multiplayer infrastructure for AI agents \u2014 shared live sessions for Claude Code (and future agent runtimes)",
+  "type": "module",
+  "bin": {
+    "collagent": "./bin/collagent.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "serve": "node bin/collagent.js serve",
+    "demo": "node scripts/e2e-demo.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
+}
