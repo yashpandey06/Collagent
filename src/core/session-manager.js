@@ -36,7 +36,7 @@ export class SessionManager {
       const created = entries.find((e) => e.kind === 'session_created');
       const session = new Session({
         code,
-        agentType: created?.data?.agentType ?? 'claude-code',
+        agentType: created?.data?.agentType ?? 'unknown',
         persistPath: path.join(dir, file),
       });
       session.log.seed(entries);

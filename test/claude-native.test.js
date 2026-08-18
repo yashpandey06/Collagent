@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { translateHookEvent, ClaudeNativeAdapter } from '../src/adapters/claude-native.js';
+import { translateHookEvent, ClaudeNativeAdapter } from '../src/adapters/claude/native.js';
 
 test('hooks: SessionStart → ready with session detail', () => {
   const events = translateHookEvent({

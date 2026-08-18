@@ -100,7 +100,7 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
 
   // ---- participant lifecycle -------------------------------------------
 
-  function onCreateSession(ws, { name = 'host', agentType = 'claude-code' }) {
+  function onCreateSession(ws, { name = 'host', agentType = 'unknown' }) {
     const session = manager.create({ agentType }); // appends session_created
     const p = session.addParticipant({ name, role: 'host' });
     registerParticipant(ws, session, p);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ClaudeCodeAdapter, normalizeClaudeMessage } from '../src/adapters/claude-code.js';
+import { ClaudeCodeAdapter, normalizeClaudeMessage } from '../src/adapters/claude/headless.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_CLAUDE = path.join(__dirname, 'fixtures', 'fake-claude.js');

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { AgentAdapter } from './adapter.js';
-import { uuid } from '../core/ids.js';
+import { AgentAdapter } from '../adapter.js';
+import { uuid } from '../../core/ids.js';
 
 /**
  * ClaudeCodeAdapter — drives a real Claude Code agent through its supported

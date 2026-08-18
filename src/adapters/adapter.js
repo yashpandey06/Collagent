@@ -4,7 +4,7 @@
  * The core session model never sees runtime-specific concepts; it only sees
  * normalized events emitted through the adapter. To make another agent
  * (Lovable, Cursor, Replit, a custom agent, ...) multiplayer, implement this
- * interface and register it in `src/adapters/index.js`.
+ * interface and register it in `src/adapters/registry.js`.
  *
  * Normalized event kinds an adapter may emit:
  *   agent_status  { status: starting|ready|working|idle|exited|error, detail? }

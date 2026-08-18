@@ -5,8 +5,13 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createCollagentServer } from '../server/server.js';
 import { CollagentClient, AgentHost } from '../client/client.js';
-import { createAdapter, adapterTypes } from '../adapters/index.js';
-import { startTui, renderEvent, renderPresence, renderRoomList, ago, shortPath, paint } from '../client/tui.js';
+import {
+  createAdapter, describeAdapter, adapterTypes, adapterFor, findRuntime, RUNTIMES,
+} from '../adapters/registry.js';
+import { startTui, renderEvent, renderPresence, renderRoomList, ago, shortPath } from '../ui/tui.js';
+import { paint } from '../ui/colors.js';
+import { printLogo } from '../ui/brand.js';
+import { pickRuntime } from '../ui/picker.js';
 import { buildRoomSummary } from '../core/room-summary.js';
 import { defaultDataDir } from '../core/session-manager.js';
 import { VERSION } from '../version.js';
@@ -16,31 +21,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, '..', '..', 'bin', 'collagent.js');
 
 const USAGE = `
-collagent — multiplayer sessions for AI agents (Claude Code MVP)
+collagent — multiplayer sessions for AI coding agents
 
 Usage:
-  collagent create [options]       create a shared room + launch Claude Code
+  collagent create [options]       create a shared room + launch a coding agent
   collagent join <code> [options]  join a room from your machine (full history replays)
-  collagent open <code> [options]  reopen a stored room as host + re-attach Claude Code
+  collagent open <code> [options]  reopen a stored room as host + re-attach its agent
   collagent rooms                  list your rooms (live + stored) with participants
   collagent status <code>          show one room's state and participants
   collagent leave                  leave the last room you joined
   collagent serve [options]        run a session server (rooms persist across restarts)
 
 Options:
+  --agent <runtime>      coding agent to use         (${RUNTIMES.filter((r) => r.status === 'available').map((r) => r.id).join(' | ')})
   --name <name>          your display name           (default: $USER)
   --server <url>         session server              (default: ws://127.0.0.1:${DEFAULT_PORT})
-  --adapter <type>       agent adapter for create    (${adapterTypes().join(' | ')})
-  --headless             use headless claude + feed UI instead of the native Claude Code UI
+  --adapter <type>       exact adapter for create    (${adapterTypes().join(' | ')})
+  --headless             use the feed UI instead of the agent's own native UI
   --cwd <dir>            working dir for the agent   (default: current dir)
-  --model <model>        model override for claude
-  --permission-mode <m>  claude permission mode      (headless mode only; default: acceptEdits)
+  --model <model>        model override
+  --permission-mode <m>  claude permission mode      (claude headless only; default: acceptEdits)
   --port <port>          port for serve              (default: ${DEFAULT_PORT})
   --host <host>          bind host for serve         (default: 0.0.0.0)
 
-By default \`create\` launches your normal interactive Claude Code (untouched UI)
-and adds the multiplayer layer around it: hooks stream activity to participants,
-and remote instructions are typed visibly into Claude Code's own prompt box.
+\`create\` asks which coding agent to use, then launches that agent's own
+interactive UI untouched and adds the multiplayer layer around it: hooks stream
+activity to participants, and remote instructions are typed visibly into the
+agent's own prompt box. Pass --agent to skip the chooser.
 `;
 
 export async function run(argv) {
@@ -60,6 +67,7 @@ export async function run(argv) {
     case 'help':
     case '--help':
     case '-h':
+      printLogo();
       console.log(USAGE);
       await printRecentRooms(opts);
       return;
@@ -111,11 +119,18 @@ async function cmdServe(opts) {
 }
 
 async function cmdCreate(opts) {
+  const adapterType = await resolveAdapter(opts);
+  if (!adapterType) return; // chooser cancelled
+
+  const descriptor = describeAdapter(adapterType);
+  console.log(`  ${paint.green('✓')} ${paint.bold(descriptor.label)}`);
+  console.log('');
+  console.log(paint.dim('  Setting up your room…'));
+
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
 
-  const adapterType = pickAdapter(opts);
   const client = new CollagentClient({ serverUrl, name });
   await client.connect();
   const created = await client.createSession({ agentType: adapterType });
@@ -145,17 +160,78 @@ async function cmdOpen(opts) {
     return enterRoomFeed({ client, welcome, name, code });
   }
 
-  const resumeId = welcome.agentSessionId ?? null;
+  // A stored room already knows which agent it ran; reuse it rather than ask
+  // again, unless the caller explicitly names a different one.
+  let adapterType = welcome.session?.agentType;
+  if (opts.adapter || opts.agent || opts.runtime || !isKnownAdapter(adapterType)) {
+    adapterType = await resolveAdapter(opts);
+    if (!adapterType) return;
+  }
+
   await hostRoom({
     client, code, serverUrl, opts,
-    adapterType: pickAdapter(opts),
+    adapterType,
     verb: 'reopened',
-    resumeId,
+    resumeId: welcome.agentSessionId ?? null,
   });
 }
 
-const pickAdapter = (opts) =>
-  opts.adapter ?? (opts.headless || !process.stdout.isTTY ? 'claude-code' : 'claude-native');
+function isKnownAdapter(type) {
+  try {
+    describeAdapter(type);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Which adapter to run. An explicit --adapter wins, then --agent, then the
+ * interactive chooser. Non-TTY sessions (CI, pipes) never prompt: they get the
+ * headless adapter, since no one is there to drive a native UI.
+ *
+ * Returns null when the user cancels the chooser.
+ */
+async function resolveAdapter(opts) {
+  const headless = Boolean(opts.headless) || !process.stdout.isTTY;
+
+  if (opts.adapter) {
+    describeAdapter(opts.adapter); // throws with the valid list if unknown
+    return opts.adapter;
+  }
+
+  const requested = opts.agent ?? opts.runtime;
+  if (requested) {
+    const runtime = findRuntime(requested);
+    if (!runtime) {
+      throw new Error(`unknown agent "${requested}" (available: ${RUNTIMES.map((r) => r.id).join(', ')})`);
+    }
+    if (runtime.status !== 'available') {
+      throw new Error(`${runtime.label} support is not ready yet — ${runtime.note}`);
+    }
+    return adapterFor(runtime.id, { headless });
+  }
+
+  if (headless) return adapterFor(DEFAULT_RUNTIME, { headless: true });
+
+  const runtime = await pickRuntime(RUNTIMES);
+  if (!runtime) {
+    console.log(paint.dim('  cancelled — no room created'));
+    return null;
+  }
+  return adapterFor(runtime.id, { headless });
+}
+
+const DEFAULT_RUNTIME = 'claude';
+
+/** Human label for a room's stored agentType, tolerant of unknown values. */
+function labelFor(agentType) {
+  try {
+    return describeAdapter(agentType).label;
+  } catch {
+    return agentType ?? 'agent';
+  }
+}
 
 async function cmdRooms(opts) {
   const serverUrl = defaultServer(opts);
@@ -230,34 +306,34 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
     if (resumeId) console.log(paint.dim(`  Resume:  continuing claude code conversation ${resumeId.slice(0, 8)}…`));
   };
 
+  const descriptor = describeAdapter(adapterType);
   const adapter = createAdapter(adapterType, {
     cwd: opts.cwd ? path.resolve(opts.cwd) : process.cwd(),
     model: opts.model,
     permissionMode: opts.permissionMode,
     statusUrl: `${httpUrl(serverUrl)}/api/sessions/${code}`,
     sessionCode: code,
-    ...(resumeId && adapterType === 'claude-native' && { extraArgs: ['--resume', resumeId] }),
-    ...(resumeId && adapterType === 'claude-code' && { sessionId: resumeId, resume: true }),
+    ...(resumeId ? descriptor.resumeOptions(resumeId) : {}),
     onExit: async () => {
       console.log('');
-      console.log(paint.dim(`claude code exited — room ${code} stays stored (reopen: collagent open ${code})`));
+      console.log(paint.dim(`${descriptor.label} exited — room ${code} stays stored (reopen: collagent open ${code})`));
       try { client.leave(); } catch { /* server may be gone */ }
       setTimeout(() => process.exit(0), 300);
     },
   });
   const host = new AgentHost({ serverUrl, code, agentToken: client.agentToken, adapter });
 
-  if (adapterType === 'claude-native') {
+  if (descriptor.ownsTerminal) {
     banner();
-    console.log(paint.dim('  Launching your normal Claude Code — remote instructions will appear in its prompt box.'));
+    console.log(paint.dim(`  Launching your normal ${descriptor.label} — remote instructions will appear in its prompt box.`));
     console.log('');
-    await host.start(); // PTY takes over this terminal with the untouched Claude Code UI
+    await host.start(); // PTY takes over this terminal with the agent's untouched UI
     return; // process stays alive via the PTY; onExit handles shutdown
   }
 
   await host.start();
   banner();
-  console.log(paint.dim(`  Agent:   ${adapterType} in ${adapter.info.cwd ?? process.cwd()}`));
+  console.log(paint.dim(`  Agent:   ${descriptor.label} in ${adapter.info.cwd ?? process.cwd()}`));
   console.log('');
   console.log(renderPresence(client.session, client.self.participantId));
   console.log(paint.dim('type an instruction, or /help for commands'));
@@ -265,6 +341,7 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
 
   startTui({
     client,
+    agentLabel: descriptor.label,
     onQuit: async () => {
       await host.stop();
       client.close();
@@ -295,6 +372,7 @@ async function cmdJoin(opts) {
 const REPLAY_SKIP = new Set(['agent_status']);
 
 function enterRoomFeed({ client, welcome, name, code }) {
+  const agentLabel = labelFor(welcome.session?.agentType ?? client.session?.agentType);
   console.log('');
   console.log(paint.green('✓ Joined shared room ') + paint.bold(code));
   if (client.name !== name) {
@@ -308,7 +386,7 @@ function enterRoomFeed({ client, welcome, name, code }) {
   if (history.length) {
     console.log(paint.dim(`— room history (${history.length} events) —`));
     for (const event of history) {
-      const line = renderEvent(event, { selfId: client.self.participantId });
+      const line = renderEvent(event, { selfId: client.self.participantId, agentLabel });
       if (line) console.log(line);
     }
     console.log(paint.dim('— you are caught up —'));
@@ -318,6 +396,7 @@ function enterRoomFeed({ client, welcome, name, code }) {
 
   startTui({
     client,
+    agentLabel,
     onQuit: () => {
       client.close();
       process.exit(0);

@@ -112,6 +112,8 @@ function renderSession() {
   el.appendChild(agent);
 }
 
+const agentLabel = () => (session && session.agentType) || 'agent';
+
 function renderEvent(e) {
   const d = e.data || {}, who = (e.actor && e.actor.name) || '';
   switch (e.kind) {
@@ -132,8 +134,8 @@ function renderEvent(e) {
     case 'mode_changed': return addLine(`⚑ mode: ${d.mode}`, 'user');
     case 'session_ended': return addLine(`■ session ended by ${who}`, 'err');
     case 'agent_status':
-      if (d.status === 'working') return addLine('· claude is working…', 'dim');
-      if (d.status === 'ready') return addLine('· claude ready', 'dim');
+      if (d.status === 'working') return addLine(`· ${agentLabel()} is working…`, 'dim');
+      if (d.status === 'ready') return addLine(`· ${agentLabel()} ready`, 'dim');
       if (d.status === 'exited' || d.status === 'disconnected') return addLine('· agent ' + d.status, 'err');
       return;
     case 'error': return addLine('! ' + d.message, 'err');

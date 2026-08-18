@@ -109,7 +109,7 @@ export class CollagentClient extends EventEmitter {
     }
   }
 
-  createSession({ agentType = 'claude-code' } = {}) {
+  createSession({ agentType = 'unknown' } = {}) {
     this._send({ type: 'create_session', name: this.name, agentType });
     return this._await('created');
   }

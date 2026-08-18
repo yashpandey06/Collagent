@@ -1,19 +1,7 @@
 import readline from 'node:readline';
+import { paint } from './colors.js';
 
-const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
-const c = (code, s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
-export const paint = {
-  dim: (s) => c('2', s),
-  bold: (s) => c('1', s),
-  green: (s) => c('32', s),
-  yellow: (s) => c('33', s),
-  blue: (s) => c('34', s),
-  magenta: (s) => c('35', s),
-  cyan: (s) => c('36', s),
-  red: (s) => c('31', s),
-};
-
-export function renderEvent(event, { selfId } = {}) {
+export function renderEvent(event, { selfId, agentLabel = 'agent' } = {}) {
   const { kind, actor = {}, data = {} } = event;
   const who = actor.name ?? 'unknown';
   const isSelf = actor.id && actor.id === selfId;
@@ -36,9 +24,9 @@ export function renderEvent(event, { selfId } = {}) {
       // Typed directly into the host's Claude Code terminal (seen via hooks)
       return `${paint.bold(paint.blue('⌨ host terminal ›'))} ${data.text}`;
     case 'notice':
-      return paint.yellow(`🔔 claude code: ${data.message}`);
+      return paint.yellow(`🔔 ${agentLabel}: ${data.message}`);
     case 'agent_message':
-      return `${paint.magenta('⏺ claude')} ${data.text}`;
+      return `${paint.magenta(`⏺ ${agentLabel}`)} ${data.text}`;
     case 'tool_use':
       return paint.yellow(`  ⚙ ${data.tool} ${paint.dim(truncate(data.input ?? '', 120))}`);
     case 'tool_result':
@@ -52,11 +40,11 @@ export function renderEvent(event, { selfId } = {}) {
     }
     case 'agent_status': {
       const map = {
-        starting: paint.dim('· claude code is starting…'),
-        ready: paint.green(`· claude code ready ${paint.dim(data.detail?.model ?? '')}`),
-        working: paint.dim('· claude code is working…'),
+        starting: paint.dim(`· ${agentLabel} is starting…`),
+        ready: paint.green(`· ${agentLabel} ready ${paint.dim(data.detail?.model ?? '')}`),
+        working: paint.dim(`· ${agentLabel} is working…`),
         idle: null, // covered by the result line
-        exited: paint.red(`· claude code exited${data.detail?.code != null ? ` (code ${data.detail.code})` : ''}`),
+        exited: paint.red(`· ${agentLabel} exited${data.detail?.code != null ? ` (code ${data.detail.code})` : ''}`),
         disconnected: paint.red('· agent disconnected'),
         error: paint.red(`· agent error: ${data.detail?.message ?? ''}`),
       };
@@ -177,13 +165,13 @@ const HELP = `
   /mode open|driver    open: anyone can instruct; driver: only the driver
   /end                 end the session for everyone (host)
   /quit                leave the session
-  anything else        sent as an instruction to the shared Claude Code agent
+  anything else        sent as an instruction to the shared agent
 `;
 
 /**
  * Interactive terminal loop shared by `collagent create` and `collagent join`.
  */
-export function startTui({ client, onQuit }) {
+export function startTui({ client, onQuit, agentLabel = 'agent' }) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -198,7 +186,7 @@ export function startTui({ client, onQuit }) {
     rl.prompt(true);
   };
 
-  client.on('event', (event) => println(renderEvent(event, { selfId: client.self?.participantId })));
+  client.on('event', (event) => println(renderEvent(event, { selfId: client.self?.participantId, agentLabel })));
   client.on('session', () => {}); // presence shown on demand via /participants
   client.on('server-error', (message) => println(paint.red(`! ${message}`)));
   client.on('disconnected', () => println(paint.red('· connection lost — reconnecting…')));

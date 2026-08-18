@@ -3,12 +3,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgentAdapter } from './adapter.js';
-import { token } from '../core/ids.js';
+import { AgentAdapter } from '../adapter.js';
+import { token } from '../../core/ids.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const HOOK_BIN = path.join(__dirname, '..', '..', 'bin', 'collagent-hook.js');
-const STATUSLINE_BIN = path.join(__dirname, '..', '..', 'bin', 'collagent-statusline.js');
+const HOOK_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-hook.js');
+const STATUSLINE_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-statusline.js');
 
 /**
  * ClaudeNativeAdapter — multiplayer around the REAL interactive Claude Code

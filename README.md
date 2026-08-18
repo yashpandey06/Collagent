@@ -2,7 +2,7 @@
 
 **Multiplayer infrastructure for AI agents.**
 
-Collagent lets multiple people connect to and collaborate around the **same live agent session**. This MVP supports **Claude Code**; the architecture is built so other runtimes (Lovable, Cursor, Replit, custom agents) can be added later through adapters, without touching the core.
+Collagent lets multiple people connect to and collaborate around the **same live agent session**. It supports **Claude Code** and **Codex** today, each through its own adapter; **Cursor** is listed in the chooser as coming soon. The core knows nothing about any of them, so new runtimes plug in without touching it.
 
 ```text
 Human A ──┐
@@ -24,8 +24,27 @@ Collagent does **not** replace the agent or become another coding workspace. Cla
 $ cd my-project
 $ collagent create
 
-✓ Shared session created
-  Session: 7FK2P
+     ●     ●
+      ╲   ╱
+       ╲ ╱
+        ◉      C O L L A G E N T
+        │      multiplayer sessions for AI coding agents
+        ●
+
+  Choose your coding agent
+
+  ❯ ●  Claude Code  Anthropic   native UI · hooks · status line
+    ●  Codex        OpenAI      native UI · hooks · app-server threads
+    ○  Cursor       Anysphere   coming soon
+
+  ↑↓ move · enter select · q cancel
+```
+
+Pick one (or skip the chooser with `--agent claude` / `--agent codex`) and the room comes up:
+
+```text
+✓ Shared room created
+  Room:    7FK2P
   Invite:  collagent join 7FK2P
   Launching your normal Claude Code…
 ```
@@ -146,9 +165,33 @@ AgentAdapter
   disconnect()         tear down
 ```
 
-Adapters emit **normalized events** — `agent_status`, `agent_message`, `tool_use`, `tool_result`, `result`, `error` — so the core never sees runtime-specific shapes. New runtimes register in `src/adapters/index.js`.
+Adapters emit **normalized events** — `agent_status`, `agent_message`, `tool_use`, `tool_result`, `result`, `error`, plus `local_prompt` and `notice` from adapters that watch a native UI — so the core never sees runtime-specific shapes.
 
-### 3a. ClaudeNativeAdapter (`src/adapters/claude-native.js`) — the default
+New runtimes register in `src/adapters/registry.js`, which also carries each adapter's **capabilities**, so no caller has to branch on an adapter's name:
+
+| Field | Meaning |
+|---|---|
+| `ownsTerminal` | the adapter takes over the terminal with the runtime's own UI, so Collagent must not start its own TUI on top of it |
+| `resumeOptions(id)` | turns a stored runtime session id into adapter options, keeping each runtime's resume convention in one place |
+
+Adapters are grouped by runtime:
+
+```text
+src/adapters/
+  adapter.js          the AgentAdapter contract
+  registry.js         runtimes + adapter descriptors (the extension point)
+  claude/
+    native.js         PTY passthrough + hooks + status line
+    headless.js       stream-json child process
+  codex/
+    native.js         PTY passthrough + hooks (via a CODEX_HOME overlay)
+    app-server.js     JSON-RPC over stdio to `codex app-server`
+    protocol.js       app-server framing + event translation
+    hooks.js          hook payload translation
+  mock.js             runtime-neutral fake, for tests
+```
+
+### 3a. ClaudeNativeAdapter (`src/adapters/claude/native.js`) — the default for Claude
 
 Multiplayer **around** the real interactive Claude Code UI, never instead of it. Three supported mechanisms:
 
@@ -158,7 +201,7 @@ Multiplayer **around** the real interactive Claude Code UI, never instead of it.
 
 What the host types locally is shared too: `UserPromptSubmit` hooks surface it to participants as `⌨ host terminal › …`.
 
-### 3b. ClaudeCodeAdapter (`src/adapters/claude-code.js`) — headless mode
+### 3b. ClaudeCodeAdapter (`src/adapters/claude/headless.js`) — headless mode
 
 For scripting, tests and the demo (`collagent create --headless`). Drives Claude Code through its **supported headless interface** (no undocumented APIs):
 
@@ -176,6 +219,24 @@ claude -p --input-format stream-json --output-format stream-json \
 A `MockAdapter` implements the same interface for tests and offline demos (`collagent create --adapter mock`).
 
 > **Why two Claude adapters?** Native mode is the product: the host's Claude Code experience stays exactly as it was, so there is nothing new to trust. Headless mode exists because it's scriptable — CI tests and `npm run demo` can assert on a full turn without a human at a terminal. Both plug into the same `AgentAdapter` interface.
+
+### 3c. Codex — `codex-native` and `codex`
+
+Codex gets the same two shapes, for the same reasons.
+
+**`codex-native`** (`src/adapters/codex/native.js`) is the default when you pick Codex: your real `codex` CLI runs in a PTY with its UI untouched, and Collagent observes it through Codex's own **hook system** (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`). Codex reads hook config from `$CODEX_HOME`, so the adapter builds a throwaway home that **symlinks** the real one — auth, config, sessions and plugins keep working exactly as before — and lays its own `hooks.json` on top, merged with any hooks you already had. Remote instructions are typed into Codex's own prompt box as `[Bob] …`, visibly.
+
+> Unlike Claude Code, Codex has no command-backed status line, so room presence can't be drawn inside Codex's UI. Read it from `collagent status` or the web page instead.
+
+**`codex`** (`src/adapters/codex/app-server.js`) drives `codex app-server` over JSON-RPC on stdio, which is the path your diagram describes:
+
+```text
+Collagent room → CodexAdapter → Codex app server → Codex thread
+```
+
+One long-lived process holds one thread. Instructions become `turn/start` calls; the thread streams items back as notifications that `protocol.js` folds into normalized events. Two details of Codex's wire format that the code has to handle: it **omits the `jsonrpc` field** entirely (a strict JSON-RPC client rejects every frame), and notifications carry an extra `emittedAtMs`. Per-token `item/agentMessage/delta` notifications are deliberately dropped in favour of the completed item — one broadcast event per token would flood every participant's feed — and `reasoning` items are never mirrored into a shared room.
+
+Because this adapter sees the agent's actual prose, Codex app-server rooms get a **complete** feed rather than the tool-only skeleton that hook-based observation produces.
 
 ### Who runs where
 
@@ -199,13 +260,14 @@ Bob types "Add OAuth callback validation."
 ## Testing
 
 ```bash
-npm test        # 18 tests, no Claude account needed (mock adapter + fake claude)
+npm test        # 45 tests, no agent account needed (mock adapter + fake runtimes)
 npm run demo    # full end-to-end against REAL Claude Code (needs `claude` installed + logged in)
 ```
 
 - `test/core.test.js` — sessions, permissions, driver fallback, event log.
 - `test/server.test.js` — the full milestone flow over real WebSockets with the mock adapter, plus pause/resume, driver-mode/handoff, reconnect replay, status API.
 - `test/claude-adapter.test.js` — stream-json normalization, and the adapter driving `test/fixtures/fake-claude.js`, a stub that speaks Claude Code's exact stream-json protocol.
+- `test/codex.test.js` — app-server and hook translation, the registry's capability descriptors, and the adapter driving `test/fixtures/fake-codex-app-server.js`, a stub that reproduces Codex's JSON-RPC quirks (no `jsonrpc` field, `emittedAtMs` on notifications).
 - `scripts/e2e-demo.js` — the first-milestone proof: Alice creates → Bob joins → Bob instructs → real Claude Code writes a file → both feeds verified identical → pause/resume/handoff exercised.
 
 ## Security notes (MVP-level)

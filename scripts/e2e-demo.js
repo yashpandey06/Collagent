@@ -15,8 +15,9 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { createCollagentServer } from '../src/server/server.js';
 import { CollagentClient, AgentHost } from '../src/client/client.js';
-import { ClaudeCodeAdapter } from '../src/adapters/claude-code.js';
-import { renderEvent, paint } from '../src/client/tui.js';
+import { ClaudeCodeAdapter } from '../src/adapters/claude/headless.js';
+import { renderEvent } from '../src/ui/tui.js';
+import { paint } from '../src/ui/colors.js';
 
 const step = (msg) => console.log(paint.bold(paint.cyan(`\n▸ ${msg}`)));
 const ok = (msg) => console.log(paint.green(`  ✓ ${msg}`));
