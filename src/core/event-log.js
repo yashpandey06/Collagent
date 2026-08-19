@@ -1,11 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/**
- * Append-only, sequence-numbered event log for one session.
- * Holds events in memory for replay/sync and optionally mirrors each
- * event to a JSONL file so history survives for auditing.
- */
+/** Append-only, seq-numbered event log; optionally mirrored to a JSONL file. */
 export class EventLog {
   constructor({ persistPath = null } = {}) {
     this.events = [];
@@ -16,7 +12,7 @@ export class EventLog {
     }
   }
 
-  /** Seed from persisted entries without re-writing them to disk. */
+  // Seed from persisted entries without re-writing them to disk.
   seed(entries) {
     this.events = [...entries];
     this.seq = entries.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
@@ -26,7 +22,7 @@ export class EventLog {
     const entry = { seq: ++this.seq, ts: Date.now(), ...event };
     this.events.push(entry);
     if (this.persistPath) {
-      // Best-effort persistence; never let disk issues break the session.
+      // best-effort: disk issues must never break the session
       try {
         fs.appendFileSync(this.persistPath, JSON.stringify(entry) + '\n');
       } catch {

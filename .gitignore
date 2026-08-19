@@ -1,0 +1,8 @@
+node_modules/
+npm-debug.log*
+*.tgz
+.DS_Store
+
+# cursor-native temporarily merges its hook forwarder into the hosted
+# workspace's .cursor/hooks.json — never commit one left behind by a crash
+.cursor/

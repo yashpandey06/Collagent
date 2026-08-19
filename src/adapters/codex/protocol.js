@@ -1,19 +1,10 @@
 /**
- * Codex app-server protocol: framing plus translation into Collagent's
- * normalized events.
- *
- * The app server speaks JSON-RPC 2.0 over stdio as newline-delimited JSON,
- * with two deviations that matter:
- *
- *   1. It never emits the `jsonrpc` field. A strict JSON-RPC client that
- *      validates inbound frames rejects every message, so we parse leniently.
- *   2. Notifications carry an extra top-level `emittedAtMs`.
- *
- * Item lifecycle is `item/started` → optional deltas → `item/completed`.
- * We deliberately ignore the delta notifications: one broadcast event per
- * streamed token would flood every participant's feed, and `item/completed`
- * carries the whole item. Reasoning items are dropped too — they are the
- * model's private thinking, not something to mirror into a shared room.
+ * Codex app-server framing + event translation. Two wire deviations matter:
+ * frames omit the `jsonrpc` field (strict clients reject everything), and
+ * notifications carry an extra `emittedAtMs` — so parse leniently. Per-token
+ * delta notifications are dropped (one broadcast per token would flood every
+ * feed; item/completed carries the whole item), and reasoning items are
+ * private thinking, never mirrored into a shared room.
  */
 
 /** Frame one outbound message. */

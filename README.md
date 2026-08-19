@@ -2,7 +2,7 @@
 
 **Multiplayer infrastructure for AI agents.**
 
-Collagent lets multiple people connect to and collaborate around the **same live agent session**. It supports **Claude Code** and **Codex** today, each through its own adapter; **Cursor** is listed in the chooser as coming soon. The core knows nothing about any of them, so new runtimes plug in without touching it.
+Collagent lets multiple people connect to and collaborate around the **same live agent session**. It supports **Claude Code**, **Codex**, **Cursor**, **Gemini CLI**, **OpenCode**, and **Goose** today, each through its own adapter. The core knows nothing about any of them, so new runtimes plug in without touching it.
 
 ```text
 Human A ──┐
@@ -33,9 +33,12 @@ $ collagent create
 
   Choose your coding agent
 
-  ❯ ●  Claude Code  Anthropic   native UI · hooks · status line
-    ●  Codex        OpenAI      native UI · hooks · app-server threads
-    ○  Cursor       Anysphere   coming soon
+  ❯ ✳  Claude Code  Anthropic   native UI · hooks · status line
+    ⬡  Codex        OpenAI      native UI · hooks · app-server threads
+    ◆  Cursor       Anysphere   native UI · hooks · print mode
+    ✦  Gemini CLI   Google      native UI · hooks · ACP
+    ▌  OpenCode     Anomaly     native UI · server events · ACP
+    ◈  Goose        Block       native UI · hooks · ACP
 
   ↑↓ move · enter select · q cancel
 ```
@@ -43,10 +46,12 @@ $ collagent create
 Pick one (or skip the chooser with `--agent claude` / `--agent codex`) and the room comes up:
 
 ```text
-✓ Shared room created
-  Room:    7FK2P
-  Invite:  collagent join 7FK2P
-  Launching your normal Claude Code…
+✓ Room created  7FK2P · Claude Code
+
+  Invite your team   collagent join 7FK2P
+  Watch in browser   http://localhost:7717/?code=7FK2P
+
+Opening your normal Claude Code — teammates' instructions appear right in its prompt box.
 ```
 
 …and then Alice is in her **completely normal, untouched Claude Code UI** — welcome box, plan mode, permission prompts, file pickers, everything. The session code and live presence stay visible in Claude Code's own **status line** at the bottom of the UI:
@@ -88,17 +93,21 @@ collagent open <code>       reopen a stored room as host and re-attach Claude Co
 collagent rooms             list all rooms — who's in them, last activity, where
 collagent status <code>     show one room's state + participants
 collagent leave             leave the last room you joined
+collagent delete <code>     delete a room and its history (asks first; --yes skips)
 collagent serve             run a standalone session server
 ```
 
-`collagent rooms` (also bare `collagent`) shows every live and stored room, newest first — online participants (or who was there), the last instruction and who sent it, the agent's working directory, relative timestamps, and event counts:
+`collagent rooms` (also bare `collagent`) shows every room — live rooms with people in them first — with the coding agent, who's there (and how many), the last instruction, the working directory, and recency:
 
 ```text
- ● 7FK2P  idle     ●Alice* ●Bob        ~/dev/api
-     └ Bob › add oauth validation to the login flow   2m ago · 47 events
+  ◉ collagent · 2 rooms
 
- ○ stored ZADU8    was: Alice, Bob
-     └ Alice › does history survive a server restart?  15m ago · 17 events
+   CODE    AGENT        STATUS  PEOPLE          FOLDER
+ ● 7FK2P   Claude Code  idle    2 · Alice* Bob  ~/dev/api
+      └ Bob › add oauth validation to the login flow   2m ago · 47 events
+
+ ○ ZADU8   Codex        saved   was Alice, Bob  ~/dev/api
+      └ Alice › does history survive a server restart?  15m ago · 17 events
 ```
 
 It works even when the server is down (reads stored history from disk), and outdated local servers are restarted automatically — rooms survive restarts.
@@ -198,6 +207,7 @@ Multiplayer **around** the real interactive Claude Code UI, never instead of it.
 1. **PTY passthrough** — `collagent create` launches your normal `claude` inside a pseudo-terminal and pipes keys/screen through byte-for-byte. Plan mode, permission prompts, pickers: all native, all answered by the host.
 2. **Hooks + status line** (documented Claude Code features) — a `--settings` overlay registers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop` and `SessionEnd` hooks. Each fires a tiny forwarder (`bin/collagent-hook.js`) that POSTs the payload to a loopback receiver; the adapter translates it into normalized events for remote participants. No output scraping. The same overlay sets a `statusLine` command (`bin/collagent-statusline.js`) so the session code, invite command and live participant presence render at the bottom of the native UI. (If you already use a custom status line, Collagent's takes over for shared sessions only.)
 3. **Composer injection** — a remote instruction is typed into Claude Code's own prompt box (bracketed paste + Enter) as `[Bob] …`, visibly. Instructions arriving before `SessionStart` (or while paused) are queued. The `UserPromptSubmit` echo of an injected instruction is deduplicated so remote users don't see it twice.
+4. **Transcript mirroring** — hooks report tool activity but never the agent's prose, so the adapter also tails the session transcript (a documented artifact whose path every hook payload carries) and mirrors new assistant text to participants as it lands. Remote users see Claude's replies, not just its tool calls.
 
 What the host types locally is shared too: `UserPromptSubmit` hooks surface it to participants as `⌨ host terminal › …`.
 
@@ -236,7 +246,23 @@ Collagent room → CodexAdapter → Codex app server → Codex thread
 
 One long-lived process holds one thread. Instructions become `turn/start` calls; the thread streams items back as notifications that `protocol.js` folds into normalized events. Two details of Codex's wire format that the code has to handle: it **omits the `jsonrpc` field** entirely (a strict JSON-RPC client rejects every frame), and notifications carry an extra `emittedAtMs`. Per-token `item/agentMessage/delta` notifications are deliberately dropped in favour of the completed item — one broadcast event per token would flood every participant's feed — and `reasoning` items are never mirrored into a shared room.
 
-Because this adapter sees the agent's actual prose, Codex app-server rooms get a **complete** feed rather than the tool-only skeleton that hook-based observation produces.
+Because this adapter sees every item the thread streams, Codex app-server rooms get the most complete feed. Hook-based rooms carry the agent's replies too: `codex-native` mirrors each turn's final message from the Stop hook's `last_assistant_message`, and `claude-native` tails the session transcript.
+
+### 3d. Cursor — `cursor-native` and `cursor`
+
+Cursor's CLI (`agent`, installed via `curl https://cursor.com/install -fsS | bash`) gets the same two shapes.
+
+**`cursor-native`** runs the real interactive `agent` in a PTY and observes it through Cursor's hook system (`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, `postToolUse`, `afterAgentResponse`, `stop`, `sessionEnd`). Cursor reads hooks from several levels and symlink-checks the config files, so the adapter merges its forwarder into the **workspace's `.cursor/hooks.json`** and restores the original file byte-for-byte on disconnect — user- and enterprise-level hooks keep running untouched. Cursor's hooks are richer than Claude Code's: `afterAgentResponse` carries the agent's prose directly (no transcript tailing) and `stop` reports a real `completed|aborted|error` status. Remote instructions are typed into Cursor's own prompt box as `[Bob] …`, visibly.
+
+**`cursor`** (headless) drives `agent -p --output-format stream-json`. Print mode is one-shot, so each instruction spawns one process; turns share a conversation via `--resume <session_id>`, captured from the first turn's `init` event. Instructions arriving mid-turn queue until the running turn ends. Runs with `--force` by default (pass it off with adapter options) — like every headless room, invitees can drive the host's machine, so choose deliberately.
+
+### 3e. Gemini CLI, OpenCode, Goose
+
+Three more runtimes, same two shapes each.
+
+**Native mode.** `gemini-native` and `goose-native` are hook-observed like the others: Gemini's hooks merge into the workspace's `.gemini/settings.json` (restored byte-for-byte on disconnect; `AfterAgent` carries the turn's reply, `BeforeAgent` dedupes injections), and Goose's live in Collagent's own plugin dir (`<cwd>/.agents/plugins/collagent/`, created on start, removed on disconnect; `Stop` carries `last_assistant_message`). `opencode-native` needs no hooks at all — OpenCode is client/server, so the adapter launches the TUI with a fixed `--port` and works through OpenCode's own API: SSE `/event` for observation (including OpenCode's own session titles) and `/tui/append-prompt` + `/tui/submit-prompt` to type remote instructions visibly into the composer.
+
+**Headless mode.** All three expose an [ACP](https://agentclientprotocol.com) agent (`gemini --acp`, `opencode acp`, `goose acp`), so one shared client (`src/adapters/acp/`) drives them: JSON-RPC over stdio, one `session/prompt` per instruction, streamed `session/update` prose coalesced into whole messages (flushed before interleaving tool calls), resume via `session/load` where the agent supports it. Agent-initiated permission requests are answered by policy: an approve-kind option is auto-selected (the acceptEdits spirit) unless the adapter runs with `autoApprove: false`, which declines them.
 
 ### Who runs where
 
@@ -268,6 +294,9 @@ npm run demo    # full end-to-end against REAL Claude Code (needs `claude` insta
 - `test/server.test.js` — the full milestone flow over real WebSockets with the mock adapter, plus pause/resume, driver-mode/handoff, reconnect replay, status API.
 - `test/claude-adapter.test.js` — stream-json normalization, and the adapter driving `test/fixtures/fake-claude.js`, a stub that speaks Claude Code's exact stream-json protocol.
 - `test/codex.test.js` — app-server and hook translation, the registry's capability descriptors, and the adapter driving `test/fixtures/fake-codex-app-server.js`, a stub that reproduces Codex's JSON-RPC quirks (no `jsonrpc` field, `emittedAtMs` on notifications).
+- `test/cursor.test.js` — hook translation, the project-level `hooks.json` merge/restore, stream-json normalization, and the adapter driving `test/fixtures/fake-cursor-agent.js`, a stub that speaks Cursor's print-mode protocol (tool calls keyed by `<name>ToolCall`, `--resume` chaining).
+- `test/acp.test.js` — the shared ACP client against `test/fixtures/fake-acp-agent.js` (chunk coalescing, permission policy, `session/load` resume, pause queueing).
+- `test/gemini.test.js`, `test/opencode.test.js`, `test/goose.test.js` — per-runtime hook/SSE translation, settings- and plugin-dir install/restore, registry descriptors.
 - `scripts/e2e-demo.js` — the first-milestone proof: Alice creates → Bob joins → Bob instructs → real Claude Code writes a file → both feeds verified identical → pause/resume/handoff exercised.
 
 ## Security notes (MVP-level)
@@ -279,6 +308,6 @@ npm run demo    # full end-to-end against REAL Claude Code (needs `claude` insta
 
 ## Roadmap (not in the MVP)
 
-- Adapters: Lovable, Cursor, Replit, custom-agent SDK (websocket protocol is already runtime-neutral)
+- Adapters: Lovable, Replit, custom-agent SDK (websocket protocol is already runtime-neutral)
 - Interrupt/steer mid-turn, per-participant tool approval, richer roles
 - Server persistence across restarts, TLS + auth for public servers

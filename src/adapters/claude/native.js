@@ -11,22 +11,10 @@ const HOOK_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-hook.j
 const STATUSLINE_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-statusline.js');
 
 /**
- * ClaudeNativeAdapter — multiplayer around the REAL interactive Claude Code
- * UI, without changing it. Three supported mechanisms, nothing else:
- *
- *  1. PTY passthrough — `claude` runs interactively inside a pseudo-terminal;
- *     the host's keystrokes and screen pass through untouched. Plan mode,
- *     permission prompts, pickers: all native, all answered by the host.
- *
- *  2. Hooks (documented Claude Code feature) — a --settings overlay registers
- *     lifecycle hooks (UserPromptSubmit, PreToolUse, PostToolUse, Stop,
- *     Notification, SessionStart/End) that POST structured activity to a
- *     loopback receiver. That stream is what remote participants see.
- *
- *  3. Composer injection — remote instructions are typed into Claude Code's
- *     own prompt box (bracketed paste + Enter), visibly, as `[Bob] …`.
- *     Nothing reaches the model behind the host's back.
- *
+ * Multiplayer around the real interactive Claude Code UI, via documented
+ * surfaces only: PTY passthrough, a --settings hooks overlay POSTing to a
+ * loopback receiver, remote instructions typed visibly into the composer,
+ * and transcript tailing for assistant prose (hooks never carry it).
  * Options: cwd, model, claudePath, extraArgs, onExit(code)
  */
 export class ClaudeNativeAdapter extends AgentAdapter {
@@ -42,6 +30,7 @@ export class ClaudeNativeAdapter extends AgentAdapter {
     this._recentInjections = [];
     this._stdinHandler = null;
     this._resizeHandler = null;
+    this._transcript = null; // { path, offset } — tail state for agent prose
   }
 
   get info() {
@@ -160,10 +149,8 @@ export class ClaudeNativeAdapter extends AgentAdapter {
         SessionEnd: entry,
       },
     };
-    // The invite banner is wiped when the interactive UI clears the screen,
-    // so session code + presence live in Claude Code's own status line.
-    // refreshInterval keeps the roster current: joins/leaves happen without
-    // conversation activity, and the status line is event-driven by default.
+    // Room code + presence live in Claude Code's status line; refreshInterval
+    // matters because joins/leaves happen without conversation activity.
     if (this.options.statusUrl && this.options.sessionCode) {
       settings.statusLine = {
         type: 'command',
@@ -179,12 +166,57 @@ export class ClaudeNativeAdapter extends AgentAdapter {
 
   _onHook(payload) {
     if (payload.hook_event_name === 'SessionStart') this._markSessionStarted();
+    // Claude Code appends the turn's final assistant line ~100-200ms AFTER the
+    // Stop hook fires (verified live), so hold the result briefly, flush, emit,
+    // then sweep once more for stragglers.
+    if (payload.hook_event_name === 'Stop' || payload.hook_event_name === 'SessionEnd') {
+      setTimeout(() => {
+        this._flushTranscript(payload.transcript_path);
+        for (const event of translateHookEvent(payload)) this.emit(event);
+        setTimeout(() => this._flushTranscript(payload.transcript_path), 2000);
+      }, 600);
+      return;
+    }
+    this._flushTranscript(payload.transcript_path);
     for (const event of translateHookEvent(payload)) {
-      // Remote instructions come back around as UserPromptSubmit when the
-      // injected text is submitted in the composer; don't echo those twice.
+      // an injected instruction echoes back as UserPromptSubmit — don't show it twice
       if (event.kind === 'local_prompt' && this._wasInjected(event.text)) continue;
       this.emit(event);
     }
+  }
+
+  // Mirror transcript additions (assistant prose, session title) since the
+  // last flush. First sighting records the file size so a resumed
+  // conversation's history is never re-broadcast.
+  _flushTranscript(path) {
+    if (!path) return;
+    try {
+      const size = fs.existsSync(path) ? fs.statSync(path).size : 0;
+      if (!this._transcript || this._transcript.path !== path) {
+        this._transcript = { path, offset: size };
+        return;
+      }
+      if (size <= this._transcript.offset) return;
+
+      const buf = Buffer.alloc(size - this._transcript.offset);
+      const fd = fs.openSync(path, 'r');
+      try {
+        fs.readSync(fd, buf, 0, buf.length, this._transcript.offset);
+      } finally {
+        fs.closeSync(fd);
+      }
+      // consume only complete lines; a line mid-write waits for the next flush
+      const lastNewline = buf.lastIndexOf(0x0a);
+      if (lastNewline < 0) return;
+      this._transcript.offset += lastNewline + 1;
+
+      const { texts, title } = extractTranscriptUpdates(buf.subarray(0, lastNewline).toString('utf8'));
+      for (const text of texts) this.emit({ kind: 'agent_message', text });
+      if (title && title !== this._sessionTitle) {
+        this._sessionTitle = title;
+        this.emit({ kind: 'session_title', title });
+      }
+    } catch { /* observability must never break the agent */ }
   }
 
   _markSessionStarted() {
@@ -313,4 +345,32 @@ function compact(value, max = 400) {
   }
   s = String(s ?? '').replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+/**
+ * Assistant prose + session title from a chunk of transcript JSONL. Text
+ * blocks only: tools are reported by hooks, thinking stays private, and
+ * sidechains are subagent-internal. Exported for tests.
+ */
+export function extractTranscriptUpdates(jsonl) {
+  const texts = [];
+  let title = null;
+  for (const line of jsonl.split('\n')) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type === 'ai-title' && entry.aiTitle?.trim()) {
+      title = entry.aiTitle.trim();
+      continue;
+    }
+    if (entry.type !== 'assistant' || entry.isSidechain) continue;
+    for (const block of entry.message?.content ?? []) {
+      if (block.type === 'text' && block.text?.trim()) texts.push(block.text);
+    }
+  }
+  return { texts, title };
 }

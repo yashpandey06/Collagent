@@ -2,27 +2,14 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
 import { encode, isServerRequest, isResponse, translateAppServerEvent } from './protocol.js';
+import { VERSION } from '../../version.js';
 
 /**
- * CodexAppServerAdapter — drives Codex through `codex app-server`:
- *
- *   Collagent room → CodexAdapter → Codex app server → Codex thread
- *
- * One long-lived process holds one thread. Instructions become `turn/start`
- * calls; the thread streams items back as JSON-RPC notifications, which
- * `translateAppServerEvent` turns into normalized events. Unlike the native
- * adapters this one sees the agent's actual prose, so rooms get a complete
- * feed rather than a tool-only skeleton.
- *
- * Options:
- *   cwd             working directory for the thread (default: process.cwd())
- *   model           model override, passed to thread/start
- *   approvalPolicy  "never" (default) — anything else can block a turn on an
- *                   approval request that no remote participant can answer
- *   sandbox         Codex sandbox mode (default: "workspace-write")
- *   codexPath       path to the codex binary (default: "codex")
- *   threadId+resume resume an existing thread instead of starting one
- *   extraArgs       extra CLI args (array)
+ * Drives Codex through `codex app-server` (JSON-RPC over stdio). One
+ * long-lived process holds one thread; instructions become turn/start calls.
+ * approvalPolicy defaults to "never" — anything else can block a turn on an
+ * approval no remote participant can answer.
+ * Options: cwd, model, approvalPolicy, sandbox, codexPath, threadId+resume, extraArgs
  */
 export class CodexAppServerAdapter extends AgentAdapter {
   constructor(options = {}) {
@@ -90,10 +77,9 @@ export class CodexAppServerAdapter extends AgentAdapter {
 
     createInterface({ input: this.proc.stdout }).on('line', (line) => this._onLine(line));
 
-    // Handshake: initialize, then the `initialized` notification. Any request
-    // before that notification is answered with "Not initialized".
+    // any request before the `initialized` notification gets "Not initialized"
     await this._request('initialize', {
-      clientInfo: { name: 'collagent', title: 'Collagent', version: '0.2.0' },
+      clientInfo: { name: 'collagent', title: 'Collagent', version: VERSION },
       capabilities: null,
     });
     this._notify('initialized');
@@ -114,6 +100,9 @@ export class CodexAppServerAdapter extends AgentAdapter {
         cwd: started?.cwd ?? cwd,
       },
     });
+    if (started?.thread?.name) {
+      this.emit({ kind: 'session_title', title: started.thread.name });
+    }
     return this.info;
   }
 
@@ -198,9 +187,8 @@ export class CodexAppServerAdapter extends AgentAdapter {
       return;
     }
 
-    // A server→client request blocks the turn until it is answered. Collagent
-    // runs with approvalPolicy "never" so these should not arrive; if one does,
-    // decline it rather than let the thread hang forever with no host to ask.
+    // A server→client request blocks the turn until answered; with no host to
+    // ask, decline rather than hang the thread forever.
     if (isServerRequest(msg)) {
       this._send({ id: msg.id, error: { code: -32601, message: 'collagent runs codex unattended' } });
       this.emit({ kind: 'notice', message: `codex asked for approval (${msg.method}) — declined` });
@@ -213,8 +201,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
   _request(method, params) {
     const id = this._nextId++;
     return new Promise((resolve, reject) => {
-      // The timer must be cleared on settle, or every request keeps the event
-      // loop alive for its full timeout and the process refuses to exit.
+      // clear the timer on settle, or every request pins the event loop for its full timeout
       const timer = setTimeout(() => {
         this._pending.delete(id);
         reject(new Error(`codex did not answer ${method} in time`));

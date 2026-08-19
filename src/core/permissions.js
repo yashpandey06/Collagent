@@ -1,11 +1,6 @@
 /**
- * Permission rules for shared sessions.
- *
- * Roles:  host (creator) | collaborator (joined via invite)
- * Modes:  open   — any participant can send instructions (default)
- *         driver — only the current driver can send instructions
- * Driver: the participant currently "holding the keyboard". Starts as the
- *         host; transferred via handoff.
+ * Roles: host | collaborator. Modes: open (anyone instructs) | driver (only
+ * the driver). The driver starts as the host and moves via handoff.
  */
 export const ACTIONS = ['instruct', 'pause', 'resume', 'handoff', 'set_mode', 'end'];
 

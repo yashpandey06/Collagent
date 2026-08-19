@@ -1,10 +1,6 @@
 import { paint } from './colors.js';
 
-/**
- * The Collagent mark: three participant nodes joined at one hub — the logo,
- * transcribed for a terminal. Outer nodes carry the ink, the hub and the
- * connectors carry the orange accent.
- */
+// The Collagent mark: three participant nodes joined at one hub.
 const MARK = [
   '  ●     ●  ',
   '   ╲   ╱   ',
@@ -22,10 +18,6 @@ const painted = (row) =>
   row.replace(/[●◉]/g, (ch) => (ch === '◉' ? paint.accent(ch) : paint.ink(ch)))
     .replace(/[╲╱│]/g, (ch) => paint.accent(ch));
 
-/**
- * The full horizontal lockup: mark on the left, wordmark on the hub line.
- * Returns lines so callers can decide on spacing and where to print it.
- */
 export function logo() {
   return MARK.map((row, i) => {
     const art = `  ${painted(row)}`;
@@ -35,12 +27,10 @@ export function logo() {
   });
 }
 
-/** Print the lockup with breathing room above and below. */
 export function printLogo() {
   console.log('');
   for (const line of logo()) console.log(line);
   console.log('');
 }
 
-/** Single-line brand for tight spots (room banners, status headers). */
 export const wordmark = () => `${paint.accent('◉')} ${paint.bold('collagent')}`;

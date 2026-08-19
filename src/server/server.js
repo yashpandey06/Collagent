@@ -10,16 +10,12 @@ import { VERSION } from '../version.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * The Collagent session server: session registry, participant presence,
- * event fan-out and routing between participants and the agent adapter.
- *
- * Transport protocol (JSON over WebSocket at /ws):
- *   participant -> server: create_session | join | rejoin | instruction |
- *                          control | leave
- *   agent host  -> server: agent_attach | agent_event
- *   server -> participant: session_created | welcome | event | session | error
- *   server -> agent host:  agent_attached | instruction | pause | resume |
- *                          handoff | end
+ * Session server: registry, presence, event fan-out, participant↔agent routing.
+ * JSON over WebSocket at /ws —
+ *   participant → create_session | join | rejoin | instruction | control | leave
+ *   agent host  → agent_attach | agent_event
+ *   server → participant: session_created | welcome | event | session | error
+ *   server → agent host:  agent_attached | instruction | pause | resume | handoff | end
  */
 export function createCollagentServer({ dataDir, log = () => {} } = {}) {
   const manager = new SessionManager({ dataDir });
@@ -64,6 +60,11 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
       return res.end(JSON.stringify(rooms));
     }
     const apiMatch = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9]+)$/);
+    if (apiMatch && req.method === 'DELETE') {
+      const deleted = deleteRoom(apiMatch[1].toUpperCase());
+      res.writeHead(deleted ? 200 : 404, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify(deleted ? { ok: true } : { error: 'not found' }));
+    }
     if (apiMatch) {
       const session = manager.get(apiMatch[1]);
       res.writeHead(session ? 200 : 404, { 'content-type': 'application/json' });
@@ -122,8 +123,7 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
     if (!session) return send(ws, { type: 'error', message: `no session with code ${code}` });
     if (session.status === 'ended') return send(ws, { type: 'error', message: 'session has ended' });
 
-    // A restored room has no host; the first joiner takes over as host and
-    // may re-attach an agent (welcome carries the credentials to do so).
+    // A restored room has no host; the first joiner takes over and may re-attach an agent.
     const role = session.hasHost() ? 'collaborator' : 'host';
     const p = session.addParticipant({ name, role });
     registerParticipant(ws, session, p);
@@ -290,6 +290,20 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
         return send(ws, { type: 'error', message: `unknown control action: ${action}` });
     }
     broadcastSession(session);
+  }
+
+  // Ends a live room (everyone is disconnected) and removes its history.
+  function deleteRoom(code) {
+    const session = manager.get(code);
+    if (session) {
+      broadcastEvent(session, session.append('session_ended', sysActor(), { deleted: true }));
+      for (const conn of participantConns.get(session.code) ?? []) conn.close();
+      agentConns.get(session.code)?.close();
+      manager.end(session.code);
+      log(`room ${code} deleted`);
+    }
+    const removedFile = manager.deleteHistory(code);
+    return Boolean(session) || removedFile;
   }
 
   // ---- helpers -----------------------------------------------------------

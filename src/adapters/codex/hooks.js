@@ -8,21 +8,11 @@ export const HOOK_EVENTS = [
   'SessionEnd',
 ];
 
-/**
- * Codex writes hook event names as PascalCase in config but the protocol's own
- * `HookEventName` type is camelCase, and payload casing is not guaranteed to
- * match either. Normalize before dispatching so all three spellings work.
- */
+// Codex mixes Pascal/camel/snake case across config, protocol and payloads —
+// normalize so all spellings dispatch.
 const normalize = (name) => String(name ?? '').replace(/[_-]/g, '').toLowerCase();
 
-/**
- * Translate a Codex hook payload into normalized Collagent events.
- * Pure function — exported for tests.
- *
- * Payload fields are snake_case (`hook_event_name`, `tool_name`, …). Field
- * names for tool output are not pinned down in Codex's docs, so the likely
- * spellings are all accepted rather than guessed at.
- */
+/** Codex hook payload → normalized events. Pure, exported for tests. */
 export function translateCodexHookEvent(payload = {}) {
   switch (normalize(payload.hook_event_name ?? payload.hookEventName)) {
     case 'sessionstart':
@@ -53,11 +43,15 @@ export function translateCodexHookEvent(payload = {}) {
         summary: compact(payload.tool_response ?? payload.tool_output ?? payload.tool_result, 200),
       }];
 
-    case 'stop':
+    case 'stop': {
+      // Stop carries the turn's final assistant message — the only prose hooks expose.
+      const text = payload.last_assistant_message ?? payload.lastAssistantMessage;
       return [
+        ...(typeof text === 'string' && text.trim() ? [{ kind: 'agent_message', text }] : []),
         { kind: 'result', ok: true },
         { kind: 'agent_status', status: 'idle' },
       ];
+    }
 
     case 'sessionend':
       return [{ kind: 'agent_status', status: 'exited', detail: { reason: payload.reason } }];

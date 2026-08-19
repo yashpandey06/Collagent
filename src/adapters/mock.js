@@ -1,9 +1,6 @@
 import { AgentAdapter } from './adapter.js';
 
-/**
- * MockAdapter — a tiny fake agent used by tests and offline demos.
- * Emits the same normalized event shapes as a real adapter would.
- */
+/** Fake agent for tests and offline demos; emits real normalized event shapes. */
 export class MockAdapter extends AgentAdapter {
   constructor(options = {}) {
     super(options);

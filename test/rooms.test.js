@@ -105,6 +105,9 @@ test('room listing endpoint returns summaries sorted by recency', async (t) => {
   await alice.connect();
   const first = await alice.createSession({ agentType: 'mock' });
   alice.sendInstruction('older room instruction');
+  // Let Alice's fire-and-forget instruction land before Bob's room starts,
+  // or "most recent" can flip under load.
+  await new Promise((r) => setTimeout(r, 100));
 
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
@@ -119,12 +122,40 @@ test('room listing endpoint returns summaries sorted by recency', async (t) => {
   assert.equal(rooms[0].lastInstruction.name, 'Bob');
   assert.deepEqual(rooms[0].participantsEver, ['Bob']);
   assert.ok(rooms[0].createdAt && rooms[0].lastActivity >= rooms[0].createdAt);
+  assert.equal(rooms[0].title, 'newest room instruction', 'first instruction stands in as the topic');
   assert.ok(!JSON.stringify(rooms).includes('agentSessionId'), 'no runtime ids in public listing');
   assert.ok(rooms.every((r) => typeof r.eventCount === 'number'));
   assert.ok(rooms.some((r) => r.code === first.session.code));
 
   alice.close();
   bob.close();
+});
+
+test('DELETE /api/sessions/:code ends a live room and removes its history', async (t) => {
+  const dataDir = tmpDataDir();
+  const server = createCollagentServer({ dataDir });
+  const addr = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+
+  const alice = new CollagentClient({ serverUrl: `ws://127.0.0.1:${addr.port}`, name: 'Alice' });
+  await alice.connect();
+  const created = await alice.createSession({ agentType: 'mock' });
+  const code = created.session.code;
+  const file = path.join(dataDir, 'history', `${code}.jsonl`);
+  assert.ok(fs.existsSync(file), 'history persisted');
+
+  const ended = new Promise((r) => alice.on('event', (e) => e.kind === 'session_ended' && r(e)));
+  const res = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${code}`, { method: 'DELETE' });
+  assert.equal(res.status, 200);
+  await ended;
+  assert.ok(!fs.existsSync(file), 'history file removed');
+
+  const rooms = await (await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)).json();
+  assert.ok(!rooms.some((r) => r.code === code), 'room gone from listings');
+
+  const again = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${code}`, { method: 'DELETE' });
+  assert.equal(again.status, 404, 'deleting twice is a clean 404');
+  alice.close();
 });
 
 test('healthz reports the server version', async (t) => {

@@ -1,12 +1,7 @@
 #!/usr/bin/env node
-/**
- * Claude Code hook forwarder. Registered (via --settings) for lifecycle hooks
- * on the shared session's Claude Code instance; reads the hook payload from
- * stdin and POSTs it to the local Collagent hook receiver.
- *
- * Must be fast, silent, and never fail: any output or non-zero exit could
- * alter Claude Code's behavior, and observation must never break the agent.
- */
+// Hook forwarder: reads the payload from stdin, POSTs it to the local receiver.
+// Must be fast, silent, and never fail — output or a non-zero exit could
+// alter the agent's behavior.
 const url = process.argv[2];
 
 let input = '';

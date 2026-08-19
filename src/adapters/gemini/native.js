@@ -1,28 +1,27 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentAdapter } from '../adapter.js';
 import { token } from '../../core/ids.js';
-import { HOOK_EVENTS, translateCodexHookEvent } from './hooks.js';
+import { buildHooksSettings, translateGeminiHookEvent } from './hooks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-hook.js');
 
 /**
- * Multiplayer around the real interactive Codex CLI: PTY passthrough, hooks
- * via a throwaway CODEX_HOME that symlinks the real one plus our hooks.json,
- * and remote instructions typed visibly into the composer. Codex has no
- * command-backed status line, so presence can't render inside its UI.
- * Options: cwd, model, codexPath, extraArgs, onExit(code)
+ * Multiplayer around the real interactive Gemini CLI: PTY passthrough, hooks
+ * merged into the workspace's .gemini/settings.json (restored byte-for-byte
+ * on disconnect; user/system settings keep working), and remote instructions
+ * typed visibly into the composer. AfterAgent carries the turn's reply, so
+ * rooms get the agent's prose from hooks alone.
+ * Options: cwd, model, geminiPath, extraArgs, onExit(code)
  */
-export class CodexNativeAdapter extends AgentAdapter {
+export class GeminiNativeAdapter extends AgentAdapter {
   constructor(options = {}) {
     super(options);
     this.pty = null;
     this.receiver = null;
-    this.codexHome = null;
     this.paused = false;
     this.queue = [];
     this.stopping = false;
@@ -30,12 +29,13 @@ export class CodexNativeAdapter extends AgentAdapter {
     this._recentInjections = [];
     this._stdinHandler = null;
     this._resizeHandler = null;
+    this._settings = null; // { file, backup, createdDir }
   }
 
   get info() {
     return {
-      type: 'codex-native',
-      ui: 'interactive codex cli (PTY passthrough)',
+      type: 'gemini-native',
+      ui: 'interactive gemini cli (PTY passthrough)',
       cwd: this.options.cwd || process.cwd(),
     };
   }
@@ -47,26 +47,26 @@ export class CodexNativeAdapter extends AgentAdapter {
     if (!pty) {
       throw new Error(
         'node-pty is not available (native build missing). Run scripts/setup.sh, ' +
-        'or use the app-server adapter: collagent create --adapter codex',
+        'or use headless mode: collagent create --adapter gemini',
       );
     }
-
-    const hookUrl = await this._startHookReceiver();
-    this.codexHome = this._writeHookOverlay(hookUrl);
 
     const {
       cwd = process.cwd(),
       model,
-      codexPath = 'codex',
+      geminiPath = 'gemini',
       extraArgs = [],
     } = this.options;
 
-    this.pty = pty.spawn(codexPath, [...(model ? ['--model', model] : []), ...extraArgs], {
+    const hookUrl = await this._startHookReceiver();
+    this._installHooks(hookUrl, cwd);
+
+    this.pty = pty.spawn(geminiPath, [...(model ? ['--model', model] : []), ...extraArgs], {
       name: process.env.TERM || 'xterm-256color',
       cols: process.stdout.columns || 120,
       rows: process.stdout.rows || 32,
       cwd,
-      env: { ...process.env, CODEX_HOME: this.codexHome },
+      env: process.env,
     });
 
     this.pty.onData((data) => process.stdout.write(data));
@@ -91,15 +91,13 @@ export class CodexNativeAdapter extends AgentAdapter {
       this.options.onExit?.(exitCode);
     });
 
-    // Codex gates hooks behind a trust prompt; if ours never runs, remote
-    // instructions would queue forever. Release them after a startup window.
+    // if hooks never fire (disabled, trust prompt), release queued instructions anyway
     this._startupFallback = setTimeout(() => this._markSessionStarted(), 20_000);
 
     this.emit({ kind: 'agent_status', status: 'ready', detail: this.info });
     return this.info;
   }
 
-  /** Loopback HTTP receiver the hook forwarder POSTs to. */
   _startHookReceiver() {
     const secret = token();
     this.receiver = http.createServer((req, res) => {
@@ -124,42 +122,43 @@ export class CodexNativeAdapter extends AgentAdapter {
     });
   }
 
-  // Throwaway CODEX_HOME: symlinks to the real one plus our hooks.json —
-  // auth/sessions/config stay in the host's actual home.
-  _writeHookOverlay(hookUrl) {
-    const realHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-    const overlay = fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-codex-'));
-
-    let existing = {};
+  // Merge our forwarder into the workspace's .gemini/settings.json, remembering
+  // what was there so disconnect() can put it back exactly.
+  _installHooks(hookUrl, cwd) {
+    const dir = path.join(cwd, '.gemini');
+    const file = path.join(dir, 'settings.json');
+    const createdDir = !fs.existsSync(dir);
+    let backup = null;
+    let existing = null;
     try {
-      for (const entry of fs.readdirSync(realHome)) {
-        if (entry === 'hooks.json') continue; // merged below, ours is written fresh
-        try {
-          fs.symlinkSync(path.join(realHome, entry), path.join(overlay, entry));
-        } catch { /* skip entries we cannot link */ }
-      }
-      existing = JSON.parse(fs.readFileSync(path.join(realHome, 'hooks.json'), 'utf8'))?.hooks ?? {};
-    } catch { /* no real home, or no hooks.json — both fine */ }
+      backup = fs.readFileSync(file, 'utf8');
+      existing = JSON.parse(backup);
+    } catch { /* no project settings yet */ }
 
-    const handler = {
-      type: 'command',
-      command: `"${process.execPath}" "${HOOK_BIN}" "${hookUrl}"`,
-      timeout: 5,
-    };
-    // Keep the host's own hooks; add ours alongside them.
-    const hooks = { ...existing };
-    for (const event of HOOK_EVENTS) {
-      hooks[event] = [...(hooks[event] ?? []), { hooks: [handler] }];
-    }
-    fs.writeFileSync(path.join(overlay, 'hooks.json'), JSON.stringify({ hooks }));
-    return overlay;
+    const command = `"${process.execPath}" "${HOOK_BIN}" "${hookUrl}"`;
+    if (createdDir) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(buildHooksSettings(existing, command), null, 2));
+    this._settings = { file, backup, createdDir };
+  }
+
+  _restoreHooks() {
+    if (!this._settings) return;
+    const { file, backup, createdDir } = this._settings;
+    this._settings = null;
+    try {
+      if (backup !== null) fs.writeFileSync(file, backup);
+      else {
+        fs.unlinkSync(file);
+        if (createdDir) fs.rmdirSync(path.dirname(file));
+      }
+    } catch { /* leave whatever state we can't clean */ }
   }
 
   _onHook(payload) {
-    const events = translateCodexHookEvent(payload);
+    const events = translateGeminiHookEvent(payload);
     if (events.some((e) => e.status === 'ready')) this._markSessionStarted();
     for (const event of events) {
-      // Injected instructions come back as UserPromptSubmit; don't echo twice.
+      // an injected instruction echoes back as BeforeAgent — don't show it twice
       if (event.kind === 'local_prompt' && this._wasInjected(event.text)) continue;
       this.emit(event);
     }
@@ -187,7 +186,6 @@ export class CodexNativeAdapter extends AgentAdapter {
   _inject({ text, from }) {
     const speaker = from?.name ? `[${from.name}] ` : '';
     const line = `${speaker}${text}`;
-    // Record before writing so the UserPromptSubmit echo is always recognized.
     this._recentInjections.push({ text: line, ts: Date.now() });
     if (this._recentInjections.length > 20) this._recentInjections.shift();
     if (!this.pty) return { queued: false };
@@ -209,7 +207,7 @@ export class CodexNativeAdapter extends AgentAdapter {
 
   async resume() {
     this.paused = false;
-    if (!this.sessionStarted) return; // queue flushes on session start
+    if (!this.sessionStarted) return;
     const held = this.queue.splice(0);
     for (const instruction of held) this._inject(instruction);
   }
@@ -231,7 +229,7 @@ export class CodexNativeAdapter extends AgentAdapter {
       try { process.stdin.setRawMode(false); } catch { /* ignore */ }
     }
     process.stdin.pause();
-    process.stdout.write('\x1b[?25h'); // ensure cursor is visible
+    process.stdout.write('\x1b[?25h');
   }
 
   async disconnect() {
@@ -242,10 +240,6 @@ export class CodexNativeAdapter extends AgentAdapter {
     this.pty = null;
     this.receiver?.close();
     this.receiver = null;
-    if (this.codexHome) {
-      // Entries are symlinks; removing them never touches the real Codex home.
-      try { fs.rmSync(this.codexHome, { recursive: true, force: true }); } catch { /* ignore */ }
-      this.codexHome = null;
-    }
+    this._restoreHooks();
   }
 }

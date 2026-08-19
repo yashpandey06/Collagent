@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { translateAppServerEvent, isServerRequest, isResponse } from '../src/adapters/codex/protocol.js';
 import { translateCodexHookEvent, HOOK_EVENTS } from '../src/adapters/codex/hooks.js';
 import { CodexAppServerAdapter } from '../src/adapters/codex/app-server.js';
-import { describeAdapter, adapterFor, findRuntime } from '../src/adapters/registry.js';
+import {
+  describeAdapter, adapterFor, findRuntime, isRuntimeInstalled, runtimesWithInstallState, RUNTIMES,
+} from '../src/adapters/registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_CODEX = path.join(__dirname, 'fixtures', 'fake-codex-app-server.js');
@@ -163,6 +165,14 @@ test('hooks: tool use, stop and session end', () => {
     translateCodexHookEvent({ hook_event_name: 'Stop' }).map((e) => e.kind),
     ['result', 'agent_status'],
   );
+  // Stop carries the turn's final prose — mirror it so remote participants
+  // see what the agent said, not just that it stopped.
+  const stopWithText = translateCodexHookEvent({
+    hook_event_name: 'Stop',
+    last_assistant_message: 'Created welcome.txt with the requested line.',
+  });
+  assert.deepEqual(stopWithText.map((e) => e.kind), ['agent_message', 'result', 'agent_status']);
+  assert.match(stopWithText[0].text, /welcome\.txt/);
   const [end] = translateCodexHookEvent({ hook_event_name: 'SessionEnd', reason: 'exit' });
   assert.equal(end.status, 'exited');
   assert.deepEqual(translateCodexHookEvent({ hook_event_name: 'PreCompact' }), []);
@@ -248,10 +258,21 @@ test('registry: runtimes resolve to interactive or headless adapters', () => {
   assert.equal(adapterFor('codex'), 'codex-native');
   assert.equal(adapterFor('codex', { headless: true }), 'codex');
 
-  // Cursor is listed for discoverability but cannot be selected yet.
-  assert.equal(findRuntime('cursor').status, 'coming-soon');
-  assert.equal(adapterFor('cursor'), null);
+  assert.equal(adapterFor('cursor'), 'cursor-native');
   assert.equal(findRuntime('nope'), null);
+});
+
+test('registry: every runtime carries install metadata and detection works', () => {
+  for (const runtime of RUNTIMES) {
+    assert.ok(runtime.bin, `${runtime.id} names its binary`);
+    assert.ok(runtime.install, `${runtime.id} has an install one-liner`);
+    assert.ok(runtime.glyph, `${runtime.id} has a brand glyph`);
+  }
+  assert.equal(isRuntimeInstalled({ bin: 'node' }), true, 'node is definitely on PATH');
+  assert.equal(isRuntimeInstalled({ bin: 'definitely-not-a-real-binary-xyz' }), false);
+  assert.equal(isRuntimeInstalled({}), true, 'no bin means nothing to detect (mock)');
+  const state = runtimesWithInstallState();
+  assert.ok(state.every((r) => typeof r.installed === 'boolean'));
 });
 
 test('hooks: every registered Codex hook event has a translation', () => {

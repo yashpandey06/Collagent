@@ -1,13 +1,7 @@
 #!/usr/bin/env node
-/**
- * Claude Code status line for shared sessions (registered via --settings).
- * Renders one line at the bottom of the native Claude Code UI:
- *
- *   ⧉ collagent 7FK2P · ●Alice* ●Bob · working · invite: collagent join 7FK2P
- *
- * argv[2] = session status API url, argv[3] = session code (fallback label).
- * Claude Code re-runs this as the session changes, so presence stays live.
- */
+// Claude Code status line for shared sessions:
+//   ⧉ collagent 7FK2P · ●Alice* ●Bob · working · invite: collagent join 7FK2P
+// argv[2] = status API url, argv[3] = session code (fallback label).
 const [, , apiUrl, code = ''] = process.argv;
 
 let input = '';

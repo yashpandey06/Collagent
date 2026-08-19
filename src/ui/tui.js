@@ -21,22 +21,24 @@ export function renderEvent(event, { selfId, agentLabel = 'agent' } = {}) {
     case 'instruction':
       return `${paint.bold(paint.cyan(`${name} ›`))} ${data.text}`;
     case 'local_prompt':
-      // Typed directly into the host's Claude Code terminal (seen via hooks)
       return `${paint.bold(paint.blue('⌨ host terminal ›'))} ${data.text}`;
     case 'notice':
       return paint.yellow(`🔔 ${agentLabel}: ${data.message}`);
-    case 'agent_message':
-      return `${paint.magenta(`⏺ ${agentLabel}`)} ${data.text}`;
+    case 'agent_message': {
+      const text = String(data.text ?? '').trim().split('\n').join('\n  ');
+      return `${paint.magenta(`⏺ ${agentLabel}`)} ${text}`;
+    }
     case 'tool_use':
-      return paint.yellow(`  ⚙ ${data.tool} ${paint.dim(truncate(data.input ?? '', 120))}`);
+      return `${paint.yellow(`  ⚙ ${data.tool}`)} ${paint.dim(toolInputSummary(data.input))}`;
     case 'tool_result':
       return paint.dim(`    └ ${data.isError ? paint.red('error: ') : ''}${truncate(data.summary ?? '', 140)}`);
     case 'result': {
       const secs = data.durationMs ? ` in ${(data.durationMs / 1000).toFixed(1)}s` : '';
       const cost = data.costUsd ? ` ($${data.costUsd.toFixed(4)})` : '';
-      return data.ok
+      // trailing blank line separates turns in the feed
+      return (data.ok
         ? paint.green(`✓ turn complete${secs}${cost}`)
-        : paint.red(`✗ turn failed${secs}`);
+        : paint.red(`✗ turn failed${secs}`)) + '\n';
     }
     case 'agent_status': {
       const map = {
@@ -60,6 +62,8 @@ export function renderEvent(event, { selfId, agentLabel = 'agent' } = {}) {
       return paint.cyan(`⚑ mode set to ${data.mode} by ${name}`);
     case 'session_ended':
       return paint.red(`■ session ended by ${name}`);
+    case 'session_title':
+      return null; // room metadata, not feed content
     case 'error':
       return paint.red(`! ${data.message}`);
     default:
@@ -67,7 +71,7 @@ export function renderEvent(event, { selfId, agentLabel = 'agent' } = {}) {
   }
 }
 
-export function renderPresence(session, selfId) {
+export function renderPresence(session, selfId, { agentLabel } = {}) {
   const people = session.participants
     .map((p) => {
       const marks = [];
@@ -77,9 +81,9 @@ export function renderPresence(session, selfId) {
       return p.connected ? paint.green(`● ${label}`) : paint.dim(`○ ${label}`);
     })
     .join('  ');
-  const agentName = session.agentType ?? 'agent';
+  const agentName = agentLabel ?? session.agentType ?? 'agent';
   const agent = session.status === 'waiting_agent'
-    ? paint.dim(`○ ${agentName} (starting)`)
+    ? paint.dim(`○ ${agentName} starting…`)
     : paint.magenta(`● ${agentName} [${session.status}${session.mode === 'driver' ? ', driver mode' : ''}]`);
   return `${people}  ${agent}`;
 }
@@ -100,56 +104,91 @@ export function shortPath(p, homedir) {
 }
 
 function roomState(room) {
-  if (room.ended) return paint.dim('■ ended  ');
-  if (room.offline) return paint.dim('○ stored ');
+  if (room.ended) return { icon: '■', text: 'ended', tint: paint.dim };
+  if (room.offline) return { icon: '○', text: 'saved', tint: paint.dim };
   const online = (room.participants ?? []).filter((p) => p.connected).length;
   switch (room.status) {
-    case 'working': return paint.yellow('◐ working');
-    case 'paused': return paint.yellow('⏸ paused ');
+    case 'working': return { icon: '◐', text: 'working', tint: paint.yellow };
+    case 'paused': return { icon: '⏸', text: 'paused', tint: paint.yellow };
     case 'waiting_agent':
-      return online ? paint.cyan('◌ no agent') : paint.dim('○ stored ');
-    default: return paint.green(`● ${room.status.padEnd(7)}`);
+      return online
+        ? { icon: '◌', text: 'no agent', tint: paint.cyan }
+        : { icon: '○', text: 'saved', tint: paint.dim };
+    default: return { icon: '●', text: room.status, tint: paint.green };
   }
 }
 
 function roomPeople(room) {
   const online = (room.participants ?? []).filter((p) => p.connected);
   if (online.length) {
-    return online
-      .map((p) => paint.green(`●${p.name}${p.id === room.driverId ? '*' : ''}`))
+    const shown = online.slice(0, 3)
+      .map((p) => `${p.name}${p.id === room.driverId ? '*' : ''}`)
       .join(' ');
+    const more = online.length > 3 ? ` +${online.length - 3}` : '';
+    return { text: `${online.length} · ${shown}${more}`, live: true };
   }
   const ever = room.participantsEver ?? [];
-  return ever.length ? paint.dim(`was: ${ever.join(', ')}`) : paint.dim('empty');
+  if (!ever.length) return { text: 'empty', live: false };
+  const shown = ever.slice(0, 3).join(', ');
+  const more = ever.length > 3 ? ` +${ever.length - 3}` : '';
+  return { text: `was ${shown}${more}`, live: false };
 }
 
 /**
  * Room listing for `collagent rooms`:
  *
- *   ● ZADU8  idle      ●Alice* ●Bob              ~/dev/api
- *     └ Bob › add oauth validation…              2m ago · 47 events
+ *     CODE    AGENT         STATUS    PEOPLE           TOPIC
+ *   ● ZADU8   Claude Code   idle      2 · Alice* Bob   Add OAuth validation
+ *       └ Bob › add oauth validation…   ~/dev/api · 2m ago · 47 events
  */
-export function renderRoomList(rooms, { homedir = '', width = process.stdout.columns || 100 } = {}) {
-  const lines = [];
-  for (const room of rooms) {
-    const head = [
-      ` ${roomState(room)}`,
-      paint.bold(room.code.padEnd(6)),
-      roomPeople(room),
-    ].join('  ');
-    const dir = shortPath(room.cwd, homedir);
-    lines.push(dir ? `${head}  ${paint.dim(dir)}` : head);
+export function renderRoomList(rooms, {
+  homedir = '',
+  width = process.stdout.columns || 100,
+  header = true,
+} = {}) {
+  if (!rooms.length) return '';
+  const agentW = Math.max('AGENT'.length, ...rooms.map((r) => (r.agentLabel ?? 'agent').length));
+  const statusW = Math.max('STATUS'.length, ...rooms.map((r) => roomState(r).text.length));
+  const peopleW = Math.min(28, Math.max('PEOPLE'.length, ...rooms.map((r) => roomPeople(r).text.length)));
+  const topicW = Math.max(16, width - (9 + agentW + statusW + peopleW + 8));
 
-    const meta = `${ago(room.lastActivity)} · ${room.eventCount ?? 0} events`;
+  const lines = [];
+  if (header) {
+    lines.push(paint.dim([
+      '   CODE  ',
+      'AGENT'.padEnd(agentW),
+      'STATUS'.padEnd(statusW),
+      'PEOPLE'.padEnd(peopleW),
+      'TOPIC',
+    ].join('  ')));
+  }
+
+  for (const room of rooms) {
+    const state = roomState(room);
+    const people = roomPeople(room);
+    const peopleCell = people.text.length > peopleW
+      ? people.text.slice(0, peopleW - 1) + '…'
+      : people.text.padEnd(peopleW);
+    const topic = truncate(room.title ?? '', topicW);
+    lines.push([
+      ` ${state.tint(state.icon)} ${paint.bold(room.code.padEnd(6))}`,
+      (room.agentLabel ?? 'agent').padEnd(agentW),
+      state.tint(state.text.padEnd(statusW)),
+      people.live ? paint.green(peopleCell) : paint.dim(peopleCell),
+      topic ? paint.bold(topic) : paint.dim('—'),
+    ].join('  '));
+
+    const dir = shortPath(room.cwd, homedir);
+    const meta = `${dir ? `${dir} · ` : ''}${ago(room.lastActivity)} · ${room.eventCount ?? 0} events`;
     if (room.lastInstruction?.text) {
       const speaker = `${room.lastInstruction.name} › `;
       const budget = Math.max(20, width - meta.length - speaker.length - 14);
       const text = room.lastInstruction.text.length > budget
         ? room.lastInstruction.text.slice(0, budget) + '…'
         : room.lastInstruction.text;
-      lines.push(`     ${paint.dim('└')} ${paint.cyan(speaker)}${text}  ${paint.dim(meta)}`);
+      lines.push(`      ${paint.dim('└')} ${paint.cyan(speaker)}${text}  ${paint.dim(meta)}`);
     } else {
-      lines.push(`     ${paint.dim(`└ ${meta}`)}`);
+      lines.push(`      ${paint.dim(`└ ${meta}`)}`);
     }
     lines.push('');
   }
@@ -168,9 +207,7 @@ const HELP = `
   anything else        sent as an instruction to the shared agent
 `;
 
-/**
- * Interactive terminal loop shared by `collagent create` and `collagent join`.
- */
+/** Interactive terminal loop shared by create and join. */
 export function startTui({ client, onQuit, agentLabel = 'agent' }) {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -204,11 +241,12 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
       switch (cmd) {
         case 'help': println(HELP); break;
         case 'participants':
-          println(renderPresence(client.session, client.self?.participantId));
+          println(renderPresence(client.session, client.self?.participantId, { agentLabel }));
           break;
         case 'status': {
           const s = client.session;
-          println(paint.dim(`session ${s.code} · status=${s.status} · mode=${s.mode} · events=${s.eventCount}`));
+          const online = s.participants.filter((p) => p.connected).length;
+          println(paint.dim(`room ${s.code} · ${agentLabel} · ${s.status} · ${s.mode} mode · ${online} ${online === 1 ? 'person' : 'people'} here · ${s.eventCount} events`));
           break;
         }
         case 'pause': client.control('pause'); break;
@@ -245,4 +283,20 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
 function truncate(s, n) {
   s = String(s);
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+// Adapters send tool input as JSON; humans want the one argument that matters.
+const TELLING_KEYS = ['command', 'file_path', 'absolute_path', 'path', 'pattern', 'query', 'url', 'description', 'prompt'];
+
+function toolInputSummary(input) {
+  if (input == null || input === '') return '';
+  let obj = input;
+  if (typeof input === 'string') {
+    try { obj = JSON.parse(input); } catch { return truncate(input, 110); }
+  }
+  if (typeof obj !== 'object' || obj === null) return truncate(String(obj), 110);
+  for (const key of TELLING_KEYS) {
+    if (typeof obj[key] === 'string' && obj[key].trim()) return truncate(obj[key].replace(/\s+/g, ' '), 110);
+  }
+  try { return truncate(JSON.stringify(obj), 110); } catch { return ''; }
 }

@@ -6,12 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { createCollagentServer } from '../server/server.js';
 import { CollagentClient, AgentHost } from '../client/client.js';
 import {
-  createAdapter, describeAdapter, adapterTypes, adapterFor, findRuntime, RUNTIMES,
+  createAdapter, describeAdapter, adapterTypes, adapterFor, findRuntime,
+  runtimeLabel, runtimeGlyph, isRuntimeInstalled, runtimesWithInstallState, RUNTIMES,
 } from '../adapters/registry.js';
-import { startTui, renderEvent, renderPresence, renderRoomList, ago, shortPath } from '../ui/tui.js';
+import { startTui, renderEvent, renderPresence, renderRoomList, ago } from '../ui/tui.js';
 import { paint } from '../ui/colors.js';
-import { printLogo } from '../ui/brand.js';
-import { pickRuntime } from '../ui/picker.js';
+import { printLogo, wordmark } from '../ui/brand.js';
+import { pickRuntime, confirmDanger } from '../ui/picker.js';
 import { buildRoomSummary } from '../core/room-summary.js';
 import { defaultDataDir } from '../core/session-manager.js';
 import { VERSION } from '../version.js';
@@ -30,6 +31,7 @@ Usage:
   collagent rooms                  list your rooms (live + stored) with participants
   collagent status <code>          show one room's state and participants
   collagent leave                  leave the last room you joined
+  collagent delete <code>          delete a room and its history (asks first; --yes skips)
   collagent serve [options]        run a session server (rooms persist across restarts)
 
 Options:
@@ -63,6 +65,8 @@ export async function run(argv) {
     case 'join': return cmdJoin(opts);
     case 'status': return cmdStatus(opts);
     case 'leave': return cmdLeave(opts);
+    case 'delete':
+    case 'rm': return cmdDelete(opts);
     case undefined:
     case 'help':
     case '--help':
@@ -122,10 +126,9 @@ async function cmdCreate(opts) {
   const adapterType = await resolveAdapter(opts);
   if (!adapterType) return; // chooser cancelled
 
-  const descriptor = describeAdapter(adapterType);
-  console.log(`  ${paint.green('✓')} ${paint.bold(descriptor.label)}`);
+  console.log(`  ${paint.green('✓')} ${paint.bold(runtimeLabel(adapterType))}`);
   console.log('');
-  console.log(paint.dim('  Setting up your room…'));
+  console.log(paint.dim('  Creating your room…'));
 
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
@@ -156,16 +159,17 @@ async function cmdOpen(opts) {
   saveState({ serverUrl, code, self: client.self, name });
 
   if (!client.agentToken) {
-    console.log(paint.yellow(`room ${code} already has a host — joining as a collaborator instead`));
+    console.log(paint.yellow(`  Room ${code} already has a host — joining you as a collaborator instead.`));
     return enterRoomFeed({ client, welcome, name, code });
   }
 
-  // A stored room already knows which agent it ran; reuse it rather than ask
-  // again, unless the caller explicitly names a different one.
+  // a saved room already knows its agent; only re-ask if the caller overrides
   let adapterType = welcome.session?.agentType;
   if (opts.adapter || opts.agent || opts.runtime || !isKnownAdapter(adapterType)) {
     adapterType = await resolveAdapter(opts);
     if (!adapterType) return;
+  } else {
+    requireInstalled(findRuntime(describeAdapter(adapterType).runtime));
   }
 
   await hostRoom({
@@ -185,18 +189,14 @@ function isKnownAdapter(type) {
   }
 }
 
-/**
- * Which adapter to run. An explicit --adapter wins, then --agent, then the
- * interactive chooser. Non-TTY sessions (CI, pipes) never prompt: they get the
- * headless adapter, since no one is there to drive a native UI.
- *
- * Returns null when the user cancels the chooser.
- */
+// --adapter wins, then --agent, then the chooser (null = cancelled).
+// Non-TTY sessions never prompt: they get an installed headless adapter.
 async function resolveAdapter(opts) {
   const headless = Boolean(opts.headless) || !process.stdout.isTTY;
 
   if (opts.adapter) {
-    describeAdapter(opts.adapter); // throws with the valid list if unknown
+    const descriptor = describeAdapter(opts.adapter); // throws with the valid list if unknown
+    requireInstalled(findRuntime(descriptor.runtime));
     return opts.adapter;
   }
 
@@ -209,12 +209,20 @@ async function resolveAdapter(opts) {
     if (runtime.status !== 'available') {
       throw new Error(`${runtime.label} support is not ready yet — ${runtime.note}`);
     }
+    requireInstalled(runtime);
     return adapterFor(runtime.id, { headless });
   }
 
-  if (headless) return adapterFor(DEFAULT_RUNTIME, { headless: true });
+  const runtimes = runtimesWithInstallState();
+  const installed = runtimes.filter((r) => r.status === 'available' && r.installed);
+  if (!installed.length) return noAgentsInstalled(runtimes);
 
-  const runtime = await pickRuntime(RUNTIMES);
+  if (headless) {
+    const pick = installed.find((r) => r.id === DEFAULT_RUNTIME) ?? installed[0];
+    return adapterFor(pick.id, { headless: true });
+  }
+
+  const runtime = await pickRuntime(runtimes);
   if (!runtime) {
     console.log(paint.dim('  cancelled — no room created'));
     return null;
@@ -222,35 +230,57 @@ async function resolveAdapter(opts) {
   return adapterFor(runtime.id, { headless });
 }
 
+function requireInstalled(runtime) {
+  if (!runtime || isRuntimeInstalled(runtime)) return;
+  throw new Error(
+    `${runtime.label} is not installed on this machine (no "${runtime.bin}" on PATH).\n` +
+    `Install it first:  ${runtime.install}`,
+  );
+}
+
+function noAgentsInstalled(runtimes) {
+  const width = Math.max(...runtimes.map((r) => r.label.length));
+  console.log('');
+  console.log(`  ${paint.bold('No coding agents found on this machine.')}`);
+  console.log(paint.dim('  Hosting a room runs a real agent locally — install one of these first:'));
+  console.log('');
+  for (const r of runtimes.filter((x) => x.status === 'available')) {
+    console.log(`    ${paint.ink(r.glyph ?? '●')}  ${r.label.padEnd(width)}  ${paint.dim(r.install)}`);
+  }
+  console.log('');
+  console.log(paint.dim('  Joining someone else\'s room needs no agent at all: ') + paint.bold('collagent join <code>'));
+  console.log('');
+  return null;
+}
+
 const DEFAULT_RUNTIME = 'claude';
 
-/** Human label for a room's stored agentType, tolerant of unknown values. */
-function labelFor(agentType) {
-  try {
-    return describeAdapter(agentType).label;
-  } catch {
-    return agentType ?? 'agent';
-  }
-}
+const withAgentLabels = (rooms) =>
+  rooms.map((room) => ({ ...room, agentLabel: runtimeLabel(room.agentType) }));
 
 async function cmdRooms(opts) {
   const serverUrl = defaultServer(opts);
   if (isLocalHost(serverUrl)) await ensureServer(serverUrl).catch(() => {});
   const { rooms, offline } = await listRooms(serverUrl);
 
+  // rooms with people first, then newest
+  const liveliness = (r) => ((r.participants ?? []).some((p) => p.connected) ? 1 : 0);
+  rooms.sort((a, b) => liveliness(b) - liveliness(a) || (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+
+  const notes = [];
+  if (offline) notes.push(paint.yellow('saved rooms on this machine'));
+  else if (!isLocalHost(serverUrl)) notes.push(paint.dim(`via ${new URL(serverUrl.replace(/^ws/, 'http')).host}`));
+
   console.log('');
-  const source = offline
-    ? paint.yellow('server offline — showing stored rooms from disk')
-    : paint.dim(`server ${serverUrl}`);
-  console.log(` ${paint.bold('collagent rooms')}  ${paint.dim('·')}  ${rooms.length} room${rooms.length === 1 ? '' : 's'}  ${paint.dim('·')}  ${source}`);
+  console.log(`  ${wordmark()} ${paint.dim('·')} ${rooms.length} ${rooms.length === 1 ? 'room' : 'rooms'}${notes.length ? ` ${paint.dim('·')} ${notes.join(' ')}` : ''}`);
   console.log('');
   if (!rooms.length) {
-    console.log(paint.dim('  no rooms yet — start one with: collagent create'));
+    console.log(paint.dim('  No rooms yet — start one with: ') + paint.bold('collagent create'));
     console.log('');
     return;
   }
-  console.log(renderRoomList(rooms, { homedir: os.homedir() }));
-  console.log(paint.dim(`  join: collagent join <code> · reopen: collagent open <code> · end for everyone: /end in-session`));
+  console.log(renderRoomList(withAgentLabels(rooms), { homedir: os.homedir() }));
+  console.log(paint.dim('  collagent join <code> — jump in · collagent open <code> — reopen · collagent delete <code> — remove'));
   console.log('');
 }
 
@@ -258,9 +288,9 @@ async function printRecentRooms(opts) {
   try {
     const { rooms } = await listRooms(defaultServer(opts));
     if (!rooms.length) return;
-    console.log(paint.bold('Recent rooms:'));
+    console.log(paint.bold('Recent rooms'));
     console.log('');
-    console.log(renderRoomList(rooms.slice(0, 3), { homedir: os.homedir() }));
+    console.log(renderRoomList(withAgentLabels(rooms.slice(0, 3)), { homedir: os.homedir(), header: false }));
     if (rooms.length > 3) console.log(paint.dim(`  …and ${rooms.length - 3} more — collagent rooms`));
     console.log('');
   } catch { /* listing is a bonus, never an error */ }
@@ -297,13 +327,18 @@ async function listRooms(serverUrl) {
 }
 
 async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resumeId = null }) {
+  const label = runtimeLabel(adapterType);
+  const mark = runtimeGlyph(adapterType);
   const banner = () => {
     console.log('');
-    console.log(paint.green(`✓ Shared room ${verb}`));
-    console.log(`  Room:    ${paint.bold(code)}`);
-    console.log(`  Invite:  ${paint.bold(`collagent join ${code}`)}${isRemoteable(serverUrl) ? paint.dim(` --server ${serverUrl}`) : ''}`);
-    console.log(paint.dim(`  Web:     ${httpUrl(serverUrl)}/?code=${code}`));
-    if (resumeId) console.log(paint.dim(`  Resume:  continuing claude code conversation ${resumeId.slice(0, 8)}…`));
+    console.log(`  ${paint.green('✓')} ${paint.bold(`Room ${verb}`)}  ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${label}`);
+    console.log('');
+    console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(`collagent join ${code}`)}${isRemoteable(serverUrl) ? ` ${paint.dim(`--server ${serverUrl}`)}` : ''}`);
+    console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code))}`);
+    if (resumeId) {
+      console.log(`    ${paint.dim('Resuming')}           ${paint.dim(`${label} conversation ${resumeId.slice(0, 8)}… continues where it left off`)}`);
+    }
+    console.log('');
   };
 
   const descriptor = describeAdapter(adapterType);
@@ -316,7 +351,7 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
     ...(resumeId ? descriptor.resumeOptions(resumeId) : {}),
     onExit: async () => {
       console.log('');
-      console.log(paint.dim(`${descriptor.label} exited — room ${code} stays stored (reopen: collagent open ${code})`));
+      console.log(paint.dim(`${label} closed — room ${code} is saved. Pick it back up anytime: `) + paint.bold(`collagent open ${code}`));
       try { client.leave(); } catch { /* server may be gone */ }
       setTimeout(() => process.exit(0), 300);
     },
@@ -325,23 +360,27 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
 
   if (descriptor.ownsTerminal) {
     banner();
-    console.log(paint.dim(`  Launching your normal ${descriptor.label} — remote instructions will appear in its prompt box.`));
+    console.log(paint.dim(`  Opening your normal ${label} — teammates' instructions appear right in its prompt box.`));
+    if (descriptor.runtime === 'claude') {
+      console.log(paint.dim('  Your room code and who\'s here stay visible in its status line.'));
+    } else {
+      console.log(paint.dim('  See who\'s here anytime with: collagent rooms'));
+    }
     console.log('');
-    await host.start(); // PTY takes over this terminal with the agent's untouched UI
-    return; // process stays alive via the PTY; onExit handles shutdown
+    await host.start(); // the PTY takes over this terminal; onExit handles shutdown
+    return;
   }
 
   await host.start();
   banner();
-  console.log(paint.dim(`  Agent:   ${descriptor.label} in ${adapter.info.cwd ?? process.cwd()}`));
+  console.log(renderPresence(client.session, client.self.participantId, { agentLabel: label }));
   console.log('');
-  console.log(renderPresence(client.session, client.self.participantId));
-  console.log(paint.dim('type an instruction, or /help for commands'));
+  console.log(paint.dim(`  Type to instruct ${label} · /help for commands`));
   console.log('');
 
   startTui({
     client,
-    agentLabel: descriptor.label,
+    agentLabel: label,
     onQuit: async () => {
       await host.stop();
       client.close();
@@ -367,31 +406,36 @@ async function cmdJoin(opts) {
   enterRoomFeed({ client, welcome, name, code });
 }
 
-// Status churn (working/idle flips) is noise in a replay; everything a human
-// said or the agent did stays.
-const REPLAY_SKIP = new Set(['agent_status']);
+// Status churn and title changes are metadata, not conversation — skip in replay.
+const REPLAY_SKIP = new Set(['agent_status', 'session_title']);
 
 function enterRoomFeed({ client, welcome, name, code }) {
-  const agentLabel = labelFor(welcome.session?.agentType ?? client.session?.agentType);
+  const agentType = welcome.session?.agentType ?? client.session?.agentType;
+  const agentLabel = runtimeLabel(agentType);
+  const mark = runtimeGlyph(agentType);
+  const online = client.session.participants.filter((p) => p.connected).length;
+  const topic = buildRoomSummary(welcome.events).title;
   console.log('');
-  console.log(paint.green('✓ Joined shared room ') + paint.bold(code));
+  console.log(`  ${paint.green('✓')} ${paint.bold("You're in")} ${paint.dim('·')} room ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${agentLabel} ${paint.dim('·')} ${online} ${online === 1 ? 'person' : 'people'} here`);
+  if (topic) console.log(`    ${paint.dim('Topic:')} ${paint.bold(topic)}`);
   if (client.name !== name) {
-    console.log(paint.yellow(`  the name "${name}" was taken — you are "${client.name}" here (use --name to pick your own)`));
+    console.log(paint.yellow(`    heads-up: "${name}" was taken, so you're "${client.name}" here (--name picks another)`));
   }
   console.log('');
-  console.log(renderPresence(client.session, client.self.participantId));
+  console.log(renderPresence(client.session, client.self.participantId, { agentLabel }));
   console.log('');
 
   const history = welcome.events.filter((e) => !REPLAY_SKIP.has(e.kind));
   if (history.length) {
-    console.log(paint.dim(`— room history (${history.length} events) —`));
+    console.log(paint.dim(`— catching you up · ${history.length} events —`));
     for (const event of history) {
       const line = renderEvent(event, { selfId: client.self.participantId, agentLabel });
       if (line) console.log(line);
     }
-    console.log(paint.dim('— you are caught up —'));
+    console.log(paint.dim("— you're all caught up —"));
+    console.log('');
   }
-  console.log(paint.dim('type an instruction, or /help for commands'));
+  console.log(paint.dim(`  Type to instruct ${agentLabel} · /help for commands`));
   console.log('');
 
   startTui({
@@ -420,9 +464,9 @@ async function cmdStatus(opts) {
   }
   const s = await res.json();
   console.log('');
-  console.log(renderRoomList([s], { homedir: os.homedir() }));
-  console.log(renderPresence(s, null));
-  console.log(paint.dim(`  mode ${s.mode} · created ${ago(s.createdAt)}${s.cwd ? ` · ${shortPath(s.cwd, os.homedir())}` : ''}`));
+  console.log(renderRoomList(withAgentLabels([s]), { homedir: os.homedir() }));
+  console.log(renderPresence(s, null, { agentLabel: runtimeLabel(s.agentType) }));
+  console.log(paint.dim(`  ${s.mode} mode · created ${ago(s.createdAt)} · invite: collagent join ${s.code}`));
   console.log('');
 }
 
@@ -445,11 +489,78 @@ async function cmdLeave(opts) {
     await client._await('reconnected').catch(() => {});
     client.leave();
     client.close();
-    console.log(`left session ${state.code}`);
+    console.log(`Left room ${state.code}.`);
   } catch {
-    console.log(`could not reach server; cleared local session state for ${state.code}`);
+    console.log(`Couldn't reach the server — cleared your local state for room ${state.code}.`);
   }
   clearState();
+}
+
+async function cmdDelete(opts) {
+  const code = (opts._[0] ?? '').toUpperCase();
+  if (!code) {
+    console.error('usage: collagent delete <code> [--yes]');
+    process.exitCode = 1;
+    return;
+  }
+  const serverUrl = defaultServer(opts);
+  if (isLocalHost(serverUrl)) await ensureServer(serverUrl).catch(() => {});
+  const online = Boolean(await serverHealth(serverUrl));
+
+  const room = await findRoom(code, serverUrl, online);
+  if (!room) {
+    console.error(`No room ${code}.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (!opts.yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      console.error(`refusing to delete room ${code} without confirmation — rerun with --yes`);
+      process.exitCode = 1;
+      return;
+    }
+    const peopleIn = (room.participants ?? []).some((p) => p.connected);
+    console.log('');
+    const sure = await confirmDanger({
+      title: `Delete room ${code} · ${runtimeLabel(room.agentType)}${room.title ? ` · “${room.title}”` : ''}?`,
+      detail: peopleIn
+        ? 'People are in this room right now — it ends for everyone, and its history is erased.'
+        : 'Its history will be erased. This cannot be undone.',
+    });
+    if (!sure) return console.log(paint.dim(`  Cancelled — room ${code} kept.`));
+  }
+
+  if (online) {
+    const res = await fetch(`${httpUrl(serverUrl)}/api/sessions/${code}`, { method: 'DELETE' });
+    if (res.ok) return console.log(`Room ${code} deleted.`);
+  } else {
+    try {
+      fs.unlinkSync(path.join(defaultDataDir(), 'history', `${code}.jsonl`));
+      return console.log(`Room ${code} deleted.`);
+    } catch { /* fall through */ }
+  }
+  console.error(`Could not delete room ${code}.`);
+  process.exitCode = 1;
+}
+
+// A room's summary from the live server, or from its history file when offline.
+async function findRoom(code, serverUrl, online) {
+  if (online) {
+    try {
+      const res = await fetch(`${httpUrl(serverUrl)}/api/sessions/${code}`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) return await res.json();
+    } catch { /* fall through to disk */ }
+  }
+  try {
+    const events = fs.readFileSync(path.join(defaultDataDir(), 'history', `${code}.jsonl`), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l));
+    return { code, ...buildRoomSummary(events) };
+  } catch {
+    return null;
+  }
 }
 
 // ---- local state & server bootstrap ---------------------------------------
@@ -482,6 +593,10 @@ function httpUrl(wsUrl) {
   return `http://${u.hostname}:${u.port || DEFAULT_PORT}`;
 }
 
+function webUrl(serverUrl, code) {
+  return `${httpUrl(serverUrl).replace('://127.0.0.1', '://localhost')}/?code=${code}`;
+}
+
 function isRemoteable(serverUrl) {
   const { hostname } = new URL(serverUrl.replace(/^ws/, 'http'));
   return !['127.0.0.1', 'localhost', '::1'].includes(hostname);
@@ -499,11 +614,8 @@ async function serverHealth(serverUrl) {
 const isLocalHost = (serverUrl) =>
   ['127.0.0.1', 'localhost', '::1'].includes(new URL(serverUrl.replace(/^ws/, 'http')).hostname);
 
-/**
- * Auto-start a local server when none is running, and auto-restart a local
- * server left behind by an older collagent version (its rooms restore from
- * disk on boot, so a restart loses nothing).
- */
+// Auto-start a local server, and auto-restart an outdated one — rooms
+// restore from disk on boot, so a restart loses nothing.
 async function ensureServer(serverUrl) {
   const health = await serverHealth(serverUrl);
   if (health?.version === VERSION) return;

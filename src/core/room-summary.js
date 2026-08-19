@@ -1,16 +1,14 @@
-/**
- * Derive a room's descriptive summary from its event history. Used by the
- * live server (`/api/sessions`) and by the CLI reading history files directly
- * when no server is running.
- */
+/** Derive a room's descriptive summary (listings, status views) from its event history. */
 export function buildRoomSummary(events = []) {
   let agentType;
   let createdAt;
   let cwd;
   let agentSessionId = null;
+  let title = null;
+  let firstInstruction = null;
   let lastInstruction = null;
   let ended = false;
-  const everNames = new Map(); // name -> role
+  const everNames = new Map();
 
   for (const e of events) {
     switch (e.kind) {
@@ -23,9 +21,14 @@ export function buildRoomSummary(events = []) {
         break;
       case 'instruction':
         lastInstruction = { name: e.actor?.name ?? 'someone', text: e.data?.text ?? '', ts: e.ts };
+        firstInstruction ??= lastInstruction;
         break;
       case 'local_prompt':
         lastInstruction = { name: 'host terminal', text: e.data?.text ?? '', ts: e.ts };
+        firstInstruction ??= lastInstruction;
+        break;
+      case 'session_title':
+        if (e.data?.title) title = e.data.title;
         break;
       case 'agent_status': {
         const detail = e.data?.detail;
@@ -48,8 +51,17 @@ export function buildRoomSummary(events = []) {
     eventCount: events.length,
     cwd: cwd ?? null,
     agentSessionId,
+    // Agent-provided title when the runtime names the session; otherwise the
+    // first instruction stands in so long room lists stay scannable.
+    title: title ?? truncate(firstInstruction?.text, 60),
     lastInstruction,
     participantsEver: [...everNames.keys()],
     ended,
   };
+}
+
+function truncate(s, n) {
+  if (!s) return null;
+  s = String(s).replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) + '…' : s;
 }

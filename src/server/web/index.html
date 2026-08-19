@@ -20,7 +20,7 @@
   #presence { display: flex; gap: 12px; flex-wrap: wrap; color: #9a9aa5; }
   #presence .on::before { content: "● "; color: #5ad48a; }
   #presence .off::before { content: "○ "; color: #55555f; }
-  #presence .agent::before { content: "● "; color: #b9a0ff; }
+  #presence .agent svg { width: 14px; height: 14px; vertical-align: -2px; margin-right: 5px; }
   #join { display: flex; gap: 8px; padding: 24px 16px; }
   input, button {
     background: #1a1a21; color: inherit; border: 1px solid #33333d;
@@ -95,8 +95,43 @@ function handle(msg) {
   }
 }
 
+// Rooms store adapter ids; people should read runtime brands.
+const AGENT_LABELS = {
+  'claude-native': 'Claude Code', 'claude-code': 'Claude Code',
+  'codex-native': 'Codex', codex: 'Codex',
+  'cursor-native': 'Cursor', cursor: 'Cursor',
+  'gemini-native': 'Gemini CLI', gemini: 'Gemini CLI',
+  'opencode-native': 'OpenCode', opencode: 'OpenCode',
+  'goose-native': 'Goose', goose: 'Goose', mock: 'Mock agent',
+};
+const agentLabel = () =>
+  (session && (AGENT_LABELS[session.agentType] || session.agentType)) || 'agent';
+
+// Vendor marks: Anthropic starburst, OpenAI hexagon, Cursor's isometric cube.
+const MARK_CLAUDE = '<svg viewBox="0 0 24 24" fill="none" stroke="#D97757" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg>';
+const MARK_CODEX = '<svg viewBox="0 0 24 24" fill="none" stroke="#e6e6ea" stroke-width="2" stroke-linejoin="round"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5z"/></svg>';
+const MARK_CURSOR = '<svg viewBox="0 0 24 24" fill="#e6e6ea"><path d="M12 2 21 7v10l-9 5-9-5V7z" opacity=".22"/><path d="M12 2 21 7l-9 5-9-5z" opacity=".95"/><path d="M12 12v10l-9-5V7z" opacity=".55"/></svg>';
+const MARK_GEMINI = '<svg viewBox="0 0 24 24" fill="#7C8CF8"><path d="M12 2c.6 5.5 4.5 9.4 10 10-5.5.6-9.4 4.5-10 10-.6-5.5-4.5-9.4-10-10 5.5-.6 9.4-4.5 10-10z"/></svg>';
+const MARK_OPENCODE = '<svg viewBox="0 0 24 24" fill="none" stroke="#e6e6ea" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>';
+const MARK_GOOSE = '<svg viewBox="0 0 24 24" fill="#e6e6ea"><path d="M12 2 22 12 12 22 2 12z" opacity=".9"/><path d="M12 7 17 12 12 17 7 12z" fill="#101014"/></svg>';
+const AGENT_MARKS = {
+  'claude-native': MARK_CLAUDE, 'claude-code': MARK_CLAUDE,
+  'codex-native': MARK_CODEX, codex: MARK_CODEX,
+  'cursor-native': MARK_CURSOR, cursor: MARK_CURSOR,
+  'gemini-native': MARK_GEMINI, gemini: MARK_GEMINI,
+  'opencode-native': MARK_OPENCODE, opencode: MARK_OPENCODE,
+  'goose-native': MARK_GOOSE, goose: MARK_GOOSE,
+};
+const agentMark = () => (session && AGENT_MARKS[session.agentType]) || '';
+
+let roomTitle = null;
+
 function renderSession() {
-  $('sessioninfo').textContent = `session ${session.code} · ${session.status} · mode ${session.mode}`;
+  const online = session.participants.filter((p) => p.connected).length;
+  $('sessioninfo').textContent =
+    `room ${session.code} · ${agentLabel()} · ${session.status}` +
+    `${session.mode === 'driver' ? ' · driver mode' : ''} · ${online} ${online === 1 ? 'person' : 'people'} here` +
+    (roomTitle ? ` · “${roomTitle}”` : '');
   const el = $('presence');
   el.innerHTML = '';
   for (const p of session.participants) {
@@ -108,16 +143,20 @@ function renderSession() {
   }
   const agent = document.createElement('span');
   agent.className = 'agent';
-  agent.textContent = session.agentType;
+  agent.innerHTML = agentMark(); // our own static markup, never user input
+  agent.appendChild(document.createTextNode(agentLabel()));
   el.appendChild(agent);
 }
-
-const agentLabel = () => (session && session.agentType) || 'agent';
 
 function renderEvent(e) {
   const d = e.data || {}, who = (e.actor && e.actor.name) || '';
   switch (e.kind) {
-    case 'instruction': return addLine(`${who} › ${d.text}`, 'user');
+    case 'session_title':
+      if (d.title) { roomTitle = d.title; renderSession(); }
+      return;
+    case 'instruction':
+      if (!roomTitle) { roomTitle = String(d.text || '').slice(0, 60); renderSession(); }
+      return addLine(`${who} › ${d.text}`, 'user');
     case 'local_prompt': return addLine(`⌨ host terminal › ${d.text}`, 'user');
     case 'notice': return addLine(`🔔 ${d.message}`, 'tool');
     case 'agent_message': return addLine(`⏺ ${d.text}`, 'agent-msg');

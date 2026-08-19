@@ -3,15 +3,8 @@ import { participantId, token } from './ids.js';
 import { buildRoomSummary } from './room-summary.js';
 
 /**
- * A shared agent session — the fundamental Collagent object.
- *
- * Holds participants, the current control state (status / mode / driver)
- * and the ordered event log. Knows nothing about transports or about any
- * particular agent runtime: the server layer routes messages, the adapter
- * layer talks to the agent.
- *
- *   status: waiting_agent | idle | working | paused | ended
- *   mode:   open | driver
+ * A shared agent session: participants, control state, ordered event log.
+ * status: waiting_agent | idle | working | paused | ended · mode: open | driver
  */
 export class Session {
   constructor({ code, agentType = 'unknown', persistPath = null }) {
@@ -41,10 +34,7 @@ export class Session {
     return p;
   }
 
-  /**
-   * Display names must be unique within a session — both humans on one team
-   * often share an OS username, and handoff/presence are name-based.
-   */
+  // Names must be unique per session: handoff and presence are name-based.
   _uniqueName(name) {
     const base = String(name || 'guest').trim() || 'guest';
     if (!this.findParticipantByName(base)) return base;

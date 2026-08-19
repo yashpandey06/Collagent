@@ -4,24 +4,10 @@ import { AgentAdapter } from '../adapter.js';
 import { uuid } from '../../core/ids.js';
 
 /**
- * ClaudeCodeAdapter — drives a real Claude Code agent through its supported
- * headless interface:
- *
- *   claude -p --input-format stream-json --output-format stream-json --verbose
- *
- * The process stays alive across turns: user messages are written to stdin as
- * JSON lines, and Claude Code streams its activity (assistant messages, tool
- * use, tool results, turn results) back as JSON lines on stdout. Claude Code
- * remains fully responsible for execution, files, terminal and permissions —
- * this adapter only translates between Collagent's normalized events and
- * Claude Code's stream-json protocol.
- *
- * Options:
- *   cwd             working directory for the agent (default: process.cwd())
- *   model           model override, passed through to claude
- *   permissionMode  claude permission mode (default: "acceptEdits")
- *   claudePath      path to the claude binary (default: "claude")
- *   extraArgs       extra CLI args (array)
+ * Drives Claude Code headless (`claude -p --input/output-format stream-json`).
+ * One long-lived process per session: instructions in as JSON lines on stdin,
+ * activity streamed back on stdout and translated to normalized events.
+ * Options: cwd, model, permissionMode (default acceptEdits), claudePath, extraArgs
  */
 export class ClaudeCodeAdapter extends AgentAdapter {
   constructor(options = {}) {
@@ -69,8 +55,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
       ...extraArgs,
     ];
 
-    // Strip nesting markers so a Collagent session launched from inside
-    // another Claude Code session still gets a clean child process.
+    // strip nesting markers so a session launched from inside Claude Code stays clean
     const env = { ...process.env };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
@@ -78,9 +63,8 @@ export class ClaudeCodeAdapter extends AgentAdapter {
 
     this.proc = spawn(claudePath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 
-    // In stream-json mode Claude Code emits nothing (not even its init
-    // message) until the first user message arrives, so "the process is up"
-    // is our readiness signal. The real init later refreshes agent details.
+    // stream-json emits nothing until the first user message, so "process up"
+    // is the readiness signal; the real init refreshes details later
     this.proc.once('spawn', () => {
       if (!this.ready) {
         this.ready = true;
@@ -142,12 +126,10 @@ export class ClaudeCodeAdapter extends AgentAdapter {
 
   _write({ text, from }) {
     if (!this.proc || this.proc.exitCode !== null) {
-      // Process died — restart it, resuming the same Claude Code session so
-      // conversation context is preserved.
+      // restart with --resume so conversation context survives a dead process
       this._spawn({ resume: true });
       this.emit({ kind: 'agent_status', status: 'starting', detail: { resumed: true } });
     }
-    // Tag the speaker so the shared agent knows who is talking to it.
     const speaker = from?.name ? `[${from.name}] ` : '';
     const payload = {
       type: 'user',
@@ -170,9 +152,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
   }
 
   async handoff(info) {
-    // Purely informational for the agent; delivered as a lightweight note on
-    // the next instruction rather than consuming a turn. No-op for now.
-    this.lastHandoff = info;
+    this.lastHandoff = info; // informational only; the agent isn't told
   }
 
   async disconnect() {
@@ -196,10 +176,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
   }
 }
 
-/**
- * Translate one Claude Code stream-json message into zero or more
- * normalized Collagent events. Exported for tests.
- */
+/** One stream-json message → zero or more normalized events. Exported for tests. */
 export function normalizeClaudeMessage(msg) {
   const events = [];
   switch (msg.type) {

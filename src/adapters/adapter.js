@@ -1,18 +1,19 @@
 /**
- * AgentAdapter — the contract between Collagent Core and any agent runtime.
+ * The contract between Collagent Core and any agent runtime. The core only
+ * ever sees these normalized events; new runtimes implement this interface
+ * and register in registry.js.
  *
- * The core session model never sees runtime-specific concepts; it only sees
- * normalized events emitted through the adapter. To make another agent
- * (Lovable, Cursor, Replit, a custom agent, ...) multiplayer, implement this
- * interface and register it in `src/adapters/registry.js`.
- *
- * Normalized event kinds an adapter may emit:
  *   agent_status  { status: starting|ready|working|idle|exited|error, detail? }
  *   agent_message { text }
  *   tool_use      { tool, input }
  *   tool_result   { tool?, summary, isError? }
  *   result        { ok, text?, durationMs?, costUsd? }
  *   error         { message }
+ *   session_title { title }            agent-provided room topic
+ *   local_prompt  { text }             host typed in a native UI
+ *   notice        { message }          native UI needs the host's attention
+ *
+ * Adapters wanting resume support emit sessionId in agent_status.detail.
  */
 export class AgentAdapter {
   constructor(options = {}) {

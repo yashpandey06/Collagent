@@ -2,14 +2,9 @@ import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 
 /**
- * CollagentClient — participant-side connection to a session server.
- *
- * Emits: 'created', 'welcome', 'event', 'session', 'server-error',
- *        'disconnected', 'reconnected', 'closed'
- *
- * Handles automatic reconnect with resume credentials so a dropped
- * connection rejoins the same participant identity and replays only the
- * events it missed.
+ * Participant-side connection. Emits: created, welcome, event, session,
+ * server-error, disconnected, reconnected, closed. Reconnects with resume
+ * credentials so a drop keeps identity and replays only missed events.
  */
 export class CollagentClient extends EventEmitter {
   constructor({ serverUrl, name }) {
@@ -79,11 +74,9 @@ export class CollagentClient extends EventEmitter {
 
   async _onClose() {
     if (this.closed) return this.emit('closed');
-    // A failed reconnect attempt fires its own 'close'; don't let that
-    // spawn nested reconnect loops.
+    // a failed reconnect fires its own 'close' — don't nest reconnect loops
     if (this._reconnecting) return;
     this.emit('disconnected');
-    // Reconnect with backoff while we hold resume credentials.
     if (!this.self || !this.session) return this.emit('closed');
     this._reconnecting = true;
     try {
@@ -160,10 +153,8 @@ export class CollagentClient extends EventEmitter {
 }
 
 /**
- * AgentHost — bridges an AgentAdapter to a session over its own WebSocket.
- * Runs on the machine that owns the agent (usually the session creator's).
- * Routes instructions/control from the server into the adapter, and adapter
- * events back to the server for fan-out to all participants.
+ * Bridges an AgentAdapter to a session over its own WebSocket, on the machine
+ * that owns the agent: server messages → adapter, adapter events → server.
  */
 export class AgentHost {
   constructor({ serverUrl, code, agentToken, adapter }) {

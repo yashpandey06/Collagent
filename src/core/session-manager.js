@@ -76,6 +76,18 @@ export class SessionManager {
     return session;
   }
 
+  // Remove a room's persisted history. Returns true if a file was deleted.
+  deleteHistory(code) {
+    if (!this.dataDir) return false;
+    const file = path.join(this.dataDir, 'history', `${String(code).toUpperCase()}.jsonl`);
+    try {
+      fs.unlinkSync(file);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   list() {
     return [...this.sessions.values()];
   }
