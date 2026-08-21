@@ -3,90 +3,124 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { HOOK_EVENTS, buildHooksConfig, translateCursorHookEvent } from '../src/adapters/cursor/hooks.js';
+import { chatsDirFor, extractBlobEvents, CursorChatTail } from '../src/adapters/cursor/store.js';
 import { CursorNativeAdapter } from '../src/adapters/cursor/native.js';
 import { CursorAgentAdapter, normalizeCursorEvent } from '../src/adapters/cursor/headless.js';
 import { describeAdapter, findRuntime, adapterFor } from '../src/adapters/registry.js';
 
 const FAKE_CURSOR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-cursor-agent.js');
 
-test('cursor hooks: lifecycle payloads translate to normalized events', () => {
-  const [ready] = translateCursorHookEvent({
-    hook_event_name: 'sessionStart',
-    session_id: 'chat-1',
-    workspace_roots: ['/work'],
-    model: 'gpt-5',
+let sqlite = null;
+try {
+  sqlite = await import('node:sqlite');
+} catch { /* tail tests skip below */ }
+
+test('cursor store: chat records translate to normalized events', () => {
+  // prose + tool call: message and tool_use, turn keeps running
+  const working = extractBlobEvents({
+    role: 'assistant',
+    content: [
+      { type: 'reasoning', text: '' },
+      { type: 'text', text: "I'll run ls and count the entries." },
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'Shell', args: { command: 'ls' } },
+    ],
   });
-  assert.equal(ready.status, 'ready');
-  assert.equal(ready.detail.sessionId, 'chat-1');
-  assert.equal(ready.detail.cwd, '/work');
+  assert.deepEqual(working.map((e) => e.kind), ['agent_message', 'tool_use']);
+  assert.equal(working[1].tool, 'Shell');
+  assert.match(working[1].input, /ls/);
 
-  const [prompt] = translateCursorHookEvent({ hook_event_name: 'beforeSubmitPrompt', prompt: 'fix tests' });
-  assert.equal(prompt.kind, 'local_prompt');
-
-  const [use] = translateCursorHookEvent({
-    hook_event_name: 'preToolUse',
-    tool_name: 'Shell',
-    tool_input: { command: 'npm test' },
+  // tool result, with non-zero exit surfacing as an error
+  const [ok] = extractBlobEvents({
+    role: 'tool',
+    content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'Shell', result: 'Exit code: 0\n\nfine' }],
   });
-  assert.equal(use.kind, 'tool_use');
-  assert.match(use.input, /npm test/);
-
-  const [result] = translateCursorHookEvent({
-    hook_event_name: 'postToolUse',
-    tool_name: 'Shell',
-    tool_output: 'all green',
+  assert.equal(ok.kind, 'tool_result');
+  assert.equal(ok.isError, false);
+  const [bad] = extractBlobEvents({
+    role: 'tool',
+    content: [{ type: 'tool-result', toolCallId: 'c2', toolName: 'Shell', result: 'Exit code: 1\n\nboom' }],
   });
-  assert.equal(result.kind, 'tool_result');
+  assert.equal(bad.isError, true);
 
-  const [prose] = translateCursorHookEvent({ hook_event_name: 'afterAgentResponse', text: 'Done — file created.' });
-  assert.equal(prose.kind, 'agent_message');
+  // prose with no tool calls ends the turn
+  const done = extractBlobEvents({
+    role: 'assistant',
+    content: [{ type: 'reasoning', text: '' }, { type: 'text', text: '`ls` printed 0 entries.' }],
+  });
+  assert.deepEqual(done.map((e) => e.kind), ['agent_message', 'result', 'agent_status']);
+  assert.equal(done[2].status, 'idle');
 
-  assert.deepEqual(
-    translateCursorHookEvent({ hook_event_name: 'stop', status: 'completed' }).map((e) => e.kind),
-    ['result', 'agent_status'],
-  );
-  assert.equal(translateCursorHookEvent({ hook_event_name: 'stop', status: 'error' })[0].ok, false);
-  assert.equal(translateCursorHookEvent({ hook_event_name: 'sessionEnd', reason: 'user_close' })[0].status, 'exited');
-  assert.deepEqual(translateCursorHookEvent({ hook_event_name: 'preCompact' }), []);
+  // reasoning-only records stay private
+  assert.deepEqual(extractBlobEvents({ role: 'assistant', content: [{ type: 'reasoning', text: 'hmm' }] }), []);
+
+  // real prompts arrive wrapped in <user_query>; injected context does not
+  const typed = extractBlobEvents({
+    role: 'user',
+    content: [{ type: 'text', text: '<timestamp>now</timestamp>\n<user_query>\nfix the tests\n</user_query>' }],
+  });
+  assert.deepEqual(typed.map((e) => e.kind), ['agent_status', 'local_prompt']);
+  assert.equal(typed[1].text, 'fix the tests');
+  assert.deepEqual(extractBlobEvents({ role: 'user', content: '<user_info>env stuff</user_info>' }), []);
+  assert.deepEqual(extractBlobEvents({ role: 'system', content: 'You are…' }), []);
 });
 
-test('cursor hooks: config merge keeps existing project hooks (flat entry schema)', () => {
-  const existing = { version: 1, hooks: { afterFileEdit: [{ command: 'format.sh' }] } };
-  const merged = buildHooksConfig(existing, 'node hook.js http://x');
-  assert.equal(merged.version, 1);
-  assert.deepEqual(merged.hooks.afterFileEdit, [{ command: 'format.sh' }]);
-  for (const event of HOOK_EVENTS) {
-    const entry = merged.hooks[event].at(-1);
-    assert.equal(entry.command, 'node hook.js http://x');
-    assert.equal(typeof entry.timeout, 'number');
-  }
+test('cursor store: chats dir is keyed by md5 of the workspace path', () => {
+  const hash = createHash('md5').update('/Users/alice/dev/api').digest('hex');
+  assert.equal(chatsDirFor('/Users/alice/dev/api', '/home/x'), path.join('/home/x', '.cursor', 'chats', hash));
 });
 
-test('cursor native: hooks.json is written into the workspace and restored on disconnect', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-cursor-'));
+test('cursor store: tail follows a live chat and resume skips history', { skip: !sqlite }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-cursor-home-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-cursor-cwd-'));
+  const chatId = 'chat-abc';
+  const chatDir = path.join(chatsDirFor(cwd, home), chatId);
+  fs.mkdirSync(chatDir, { recursive: true });
+  fs.writeFileSync(path.join(chatDir, 'meta.json'), JSON.stringify({ name: 'Friendly Hello' }));
 
-  // no .cursor dir yet: created, then fully removed
-  const a1 = new CursorNativeAdapter({ cwd });
-  a1._installHooks('http://127.0.0.1:1/hook/x', cwd);
-  const file = path.join(cwd, '.cursor', 'hooks.json');
-  assert.ok(fs.existsSync(file));
-  await a1.disconnect();
-  assert.ok(!fs.existsSync(path.join(cwd, '.cursor')), 'created dir removed');
+  const db = new sqlite.DatabaseSync(path.join(chatDir, 'store.db'));
+  db.exec('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+  const put = (id, obj) => db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)')
+    .run(id, Buffer.from(JSON.stringify(obj)));
+  put('b1', { role: 'system', content: 'You are…' });
+  put('b2', {
+    role: 'user',
+    content: [{ type: 'text', text: '<user_query>[Bob] hy</user_query>' }],
+  });
 
-  // existing project hooks: merged, then restored byte-for-byte
-  fs.mkdirSync(path.join(cwd, '.cursor'));
-  const original = JSON.stringify({ version: 1, hooks: { stop: [{ command: 'notify.sh' }] } });
-  fs.writeFileSync(file, original);
-  const a2 = new CursorNativeAdapter({ cwd });
-  a2._installHooks('http://127.0.0.1:1/hook/x', cwd);
-  const merged = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(merged.hooks.stop[0].command, 'notify.sh');
-  assert.equal(merged.hooks.stop.length, 2);
-  await a2.disconnect();
-  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  const seen = [];
+  const tail = new CursorChatTail({ cwd, home, onEvent: (e) => seen.push(e), intervalMs: 40 });
+  tail.sinceMs = 0; // fixture dirs predate "now"
+  await tail.start();
+  await waitFor(() => seen.some((e) => e.kind === 'local_prompt'));
 
+  assert.equal(seen.find((e) => e.status === 'ready')?.detail.sessionId, chatId);
+  assert.equal(seen.find((e) => e.kind === 'session_title')?.title, 'Friendly Hello');
+  assert.equal(seen.find((e) => e.kind === 'local_prompt')?.text, '[Bob] hy');
+
+  // a reply lands in the store → the room sees it, and the turn completes
+  put('b3', { role: 'assistant', content: [{ type: 'text', text: 'Hey — what can I help with?' }] });
+  await waitFor(() => seen.some((e) => e.kind === 'agent_message'));
+  assert.equal(seen.find((e) => e.kind === 'agent_message')?.text, 'Hey — what can I help with?');
+  assert.ok(seen.some((e) => e.kind === 'result' && e.ok));
+  tail.stop();
+
+  // resuming attaches to the stored chat but replays nothing
+  const later = [];
+  const resumed = new CursorChatTail({
+    cwd, home, sessionId: chatId, resume: true, onEvent: (e) => later.push(e), intervalMs: 40,
+  });
+  await resumed.start();
+  await waitFor(() => later.some((e) => e.status === 'ready'));
+  assert.ok(!later.some((e) => e.kind === 'agent_message'), 'history stays in the room log, not re-broadcast');
+
+  put('b4', { role: 'assistant', content: [{ type: 'text', text: 'Picking up where we left off.' }] });
+  await waitFor(() => later.some((e) => e.kind === 'agent_message'));
+  resumed.stop();
+  db.close();
+
+  fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -95,9 +129,9 @@ test('cursor native: injected instructions are not echoed as local prompts', () 
   const seen = [];
   adapter.attach((e) => seen.push(e));
   adapter._inject({ text: 'add oauth', from: { name: 'Bob' } });
-  adapter._onHook({ hook_event_name: 'beforeSubmitPrompt', prompt: '[Bob] add oauth' });
+  adapter._onStoreEvent({ kind: 'local_prompt', text: '[Bob] add oauth' });
   assert.equal(seen.filter((e) => e.kind === 'local_prompt').length, 0);
-  adapter._onHook({ hook_event_name: 'beforeSubmitPrompt', prompt: 'host typed this' });
+  adapter._onStoreEvent({ kind: 'local_prompt', text: 'host typed this' });
   assert.equal(seen.filter((e) => e.kind === 'local_prompt').length, 1);
 });
 
@@ -133,7 +167,10 @@ test('registry: cursor runtime is available with both adapter shapes', () => {
   assert.equal(adapterFor('cursor'), 'cursor-native');
   assert.equal(adapterFor('cursor', { headless: true }), 'cursor');
   assert.equal(describeAdapter('cursor-native').ownsTerminal, true);
-  assert.deepEqual(describeAdapter('cursor-native').resumeOptions('c1'), { extraArgs: ['--resume', 'c1'] });
+  assert.deepEqual(
+    describeAdapter('cursor-native').resumeOptions('c1'),
+    { extraArgs: ['--resume', 'c1'], sessionId: 'c1', resume: true },
+  );
   assert.deepEqual(describeAdapter('cursor').resumeOptions('c1'), { sessionId: 'c1', resume: true });
 });
 
@@ -184,3 +221,13 @@ test('cursor headless: paused instructions queue and flush on resume', async () 
   await done;
   await adapter.disconnect();
 });
+
+function waitFor(predicate, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (predicate()) { clearInterval(timer); resolve(); }
+      else if (Date.now() - started > timeoutMs) { clearInterval(timer); reject(new Error('timed out')); }
+    }, 20);
+  });
+}

@@ -18,18 +18,18 @@ const painted = (row) =>
   row.replace(/[●◉]/g, (ch) => (ch === '◉' ? paint.accent(ch) : paint.ink(ch)))
     .replace(/[╲╱│]/g, (ch) => paint.accent(ch));
 
-export function logo() {
+export function logo(subtitle = TAGLINE) {
   return MARK.map((row, i) => {
     const art = `  ${painted(row)}`;
     if (i === HUB_ROW) return `${art}  ${paint.bold(paint.ink(WORDMARK))}`;
-    if (i === HUB_ROW + 1) return `${art}  ${paint.dim(TAGLINE)}`;
+    if (i === HUB_ROW + 1) return `${art}  ${paint.dim(subtitle)}`;
     return art;
   });
 }
 
-export function printLogo() {
+export function printLogo(subtitle) {
   console.log('');
-  for (const line of logo()) console.log(line);
+  for (const line of logo(subtitle)) console.log(line);
   console.log('');
 }
 

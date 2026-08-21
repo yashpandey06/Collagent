@@ -1,27 +1,19 @@
-import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
 import { AgentAdapter } from '../adapter.js';
-import { token } from '../../core/ids.js';
-import { fileURLToPath } from 'node:url';
-import { buildHooksConfig, translateCursorHookEvent } from './hooks.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const HOOK_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-hook.js');
+import { CursorChatTail } from './store.js';
 
 /**
  * Multiplayer around the real interactive Cursor CLI (`agent`): PTY
- * passthrough, hooks via a merged project-level .cursor/hooks.json (Cursor
- * symlink-checks hook configs, so no symlink overlay — the original file is
- * restored on disconnect), and remote instructions typed visibly into the
- * composer. User/enterprise-level hooks keep running untouched.
- * Options: cwd, model, cursorPath, extraArgs, onExit(code)
+ * passthrough, remote instructions typed visibly into the composer, and
+ * observation by tailing Cursor's own chat store (~/.cursor/chats) — current
+ * CLI builds ignore hooks.json entirely (verified live), so the store is the
+ * transparent feed: prose, tool calls, tool results, host prompts, titles.
+ * Options: cwd, model, cursorPath, extraArgs, sessionId+resume, onExit(code)
  */
 export class CursorNativeAdapter extends AgentAdapter {
   constructor(options = {}) {
     super(options);
     this.pty = null;
-    this.receiver = null;
+    this.tail = null;
     this.paused = false;
     this.queue = [];
     this.stopping = false;
@@ -29,7 +21,6 @@ export class CursorNativeAdapter extends AgentAdapter {
     this._recentInjections = [];
     this._stdinHandler = null;
     this._resizeHandler = null;
-    this._hooks = null; // { file, backup, createdDir }
   }
 
   get info() {
@@ -37,6 +28,7 @@ export class CursorNativeAdapter extends AgentAdapter {
       type: 'cursor-native',
       ui: 'interactive cursor cli (PTY passthrough)',
       cwd: this.options.cwd || process.cwd(),
+      sessionId: this.options.sessionId ?? undefined,
     };
   }
 
@@ -57,9 +49,6 @@ export class CursorNativeAdapter extends AgentAdapter {
       cursorPath = 'agent',
       extraArgs = [],
     } = this.options;
-
-    const hookUrl = await this._startHookReceiver();
-    this._installHooks(hookUrl, cwd);
 
     this.pty = pty.spawn(cursorPath, [...(model ? ['--model', model] : []), ...extraArgs], {
       name: process.env.TERM || 'xterm-256color',
@@ -91,77 +80,26 @@ export class CursorNativeAdapter extends AgentAdapter {
       this.options.onExit?.(exitCode);
     });
 
-    // if hooks never fire (disabled, trust prompt), release queued instructions anyway
+    this.tail = new CursorChatTail({
+      cwd,
+      sessionId: this.options.sessionId ?? null,
+      resume: Boolean(this.options.resume),
+      onEvent: (event) => this._onStoreEvent(event),
+    });
+    this.tail.start();
+
+    // if the chat store never appears (trust screen, login), inject anyway
     this._startupFallback = setTimeout(() => this._markSessionStarted(), 20_000);
 
     this.emit({ kind: 'agent_status', status: 'ready', detail: this.info });
     return this.info;
   }
 
-  _startHookReceiver() {
-    const secret = token();
-    this.receiver = http.createServer((req, res) => {
-      if (req.method !== 'POST' || req.url !== `/hook/${secret}`) {
-        res.writeHead(404);
-        return res.end();
-      }
-      let body = '';
-      req.on('data', (d) => { body += d; });
-      req.on('end', () => {
-        res.writeHead(200);
-        res.end();
-        try {
-          this._onHook(JSON.parse(body));
-        } catch { /* malformed hook payload — ignore */ }
-      });
-    });
-    return new Promise((resolve) => {
-      this.receiver.listen(0, '127.0.0.1', () => {
-        resolve(`http://127.0.0.1:${this.receiver.address().port}/hook/${secret}`);
-      });
-    });
-  }
-
-  // Merge our forwarder into the workspace's .cursor/hooks.json, remembering
-  // what was there so disconnect() can put it back exactly.
-  _installHooks(hookUrl, cwd) {
-    const dir = path.join(cwd, '.cursor');
-    const file = path.join(dir, 'hooks.json');
-    const createdDir = !fs.existsSync(dir);
-    let backup = null;
-    let existing = null;
-    try {
-      backup = fs.readFileSync(file, 'utf8');
-      existing = JSON.parse(backup);
-    } catch { /* no project hooks yet */ }
-
-    const command = `"${process.execPath}" "${HOOK_BIN}" "${hookUrl}"`;
-    if (createdDir) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(buildHooksConfig(existing, command), null, 2));
-    this._hooks = { file, backup, createdDir };
-  }
-
-  _restoreHooks() {
-    if (!this._hooks) return;
-    const { file, backup, createdDir } = this._hooks;
-    this._hooks = null;
-    try {
-      if (backup !== null) fs.writeFileSync(file, backup);
-      else {
-        fs.unlinkSync(file);
-        if (createdDir) fs.rmdirSync(path.dirname(file));
-      }
-    } catch { /* leave whatever state we can't clean */ }
-  }
-
-  _onHook(payload) {
-    const events = translateCursorHookEvent(payload);
-    if (events.some((e) => e.status === 'ready')) this._markSessionStarted();
-    for (const event of events) {
-      // an injected instruction echoes back as beforeSubmitPrompt — don't show it twice
-      if (event.kind === 'local_prompt' && this._wasInjected(event.text)) continue;
-      this.emit(event);
-    }
+  _onStoreEvent(event) {
+    if (event.kind === 'agent_status' && event.status === 'ready') this._markSessionStarted();
+    // an injected instruction comes back as the chat's user record — don't show it twice
+    if (event.kind === 'local_prompt' && this._wasInjected(event.text)) return;
+    this.emit(event);
   }
 
   _markSessionStarted() {
@@ -235,11 +173,10 @@ export class CursorNativeAdapter extends AgentAdapter {
   async disconnect() {
     this.stopping = true;
     clearTimeout(this._startupFallback);
+    this.tail?.stop();
+    this.tail = null;
     this._restoreTerminal();
     try { this.pty?.kill(); } catch { /* ignore */ }
     this.pty = null;
-    this.receiver?.close();
-    this.receiver = null;
-    this._restoreHooks();
   }
 }

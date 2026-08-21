@@ -122,7 +122,8 @@ const ADAPTERS = {
     label: 'Cursor',
     runtime: 'cursor',
     ownsTerminal: true,
-    resumeOptions: (id) => ({ extraArgs: ['--resume', id] }),
+    // sessionId doubles as the chat-store directory the tail re-attaches to
+    resumeOptions: (id) => ({ extraArgs: ['--resume', id], sessionId: id, resume: true }),
     create: (options) => new CursorNativeAdapter(options),
   },
   cursor: {

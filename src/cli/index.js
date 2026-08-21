@@ -6,13 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { createCollagentServer } from '../server/server.js';
 import { CollagentClient, AgentHost } from '../client/client.js';
 import {
-  createAdapter, describeAdapter, adapterTypes, adapterFor, findRuntime,
+  createAdapter, describeAdapter, adapterFor, findRuntime,
   runtimeLabel, runtimeGlyph, isRuntimeInstalled, runtimesWithInstallState, RUNTIMES,
 } from '../adapters/registry.js';
 import { startTui, renderEvent, renderPresence, renderRoomList, ago } from '../ui/tui.js';
 import { paint } from '../ui/colors.js';
-import { printLogo, wordmark } from '../ui/brand.js';
-import { pickRuntime, confirmDanger } from '../ui/picker.js';
+import { printLogo } from '../ui/brand.js';
+import { pickRuntime, pickRooms, confirmDanger } from '../ui/picker.js';
 import { buildRoomSummary } from '../core/room-summary.js';
 import { defaultDataDir } from '../core/session-manager.js';
 import { VERSION } from '../version.js';
@@ -21,36 +21,40 @@ export const DEFAULT_PORT = 7717;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, '..', '..', 'bin', 'collagent.js');
 
-const USAGE = `
-collagent — multiplayer sessions for AI coding agents
+// The same voice on every screen: logo → ▍ sections → bold term, dim meaning.
+function printHelp() {
+  printLogo();
+  const row = ([term, desc]) => console.log(`  ${paint.bold(term.padEnd(20))}${paint.dim(desc)}`);
 
-Usage:
-  collagent create [options]       create a shared room + launch a coding agent
-  collagent join <code> [options]  join a room from your machine (full history replays)
-  collagent open <code> [options]  reopen a stored room as host + re-attach its agent
-  collagent rooms                  list your rooms (live + stored) with participants
-  collagent status <code>          show one room's state and participants
-  collagent leave                  leave the last room you joined
-  collagent delete <code>          delete a room and its history (asks first; --yes skips)
-  collagent serve [options]        run a session server (rooms persist across restarts)
+  console.log(` ${paint.green('▍')} ${paint.green(paint.bold('COMMANDS'))}`);
+  console.log('');
+  [
+    ['create', "start a shared room around a coding agent's own UI"],
+    ['join <code>', 'join a room — its full history replays'],
+    ['open <code>', 'reopen a saved room as host, agent resumes'],
+    ['rooms', "list your rooms — topics, people, recency"],
+    ['agents', 'the coding agents collagent supports'],
+    ['status <code>', "one room's state and participants"],
+    ['delete [code]', 'delete rooms — bare delete opens a picker'],
+    ['leave', 'leave the last room you joined'],
+    ['serve', 'run a session server for your team'],
+  ].forEach(row);
+  console.log('');
 
-Options:
-  --agent <runtime>      coding agent to use         (${RUNTIMES.filter((r) => r.status === 'available').map((r) => r.id).join(' | ')})
-  --name <name>          your display name           (default: $USER)
-  --server <url>         session server              (default: ws://127.0.0.1:${DEFAULT_PORT})
-  --adapter <type>       exact adapter for create    (${adapterTypes().join(' | ')})
-  --headless             use the feed UI instead of the agent's own native UI
-  --cwd <dir>            working dir for the agent   (default: current dir)
-  --model <model>        model override
-  --permission-mode <m>  claude permission mode      (claude headless only; default: acceptEdits)
-  --port <port>          port for serve              (default: ${DEFAULT_PORT})
-  --host <host>          bind host for serve         (default: 0.0.0.0)
-
-\`create\` asks which coding agent to use, then launches that agent's own
-interactive UI untouched and adds the multiplayer layer around it: hooks stream
-activity to participants, and remote instructions are typed visibly into the
-agent's own prompt box. Pass --agent to skip the chooser.
-`;
+  console.log(` ${paint.dim('▍')} ${paint.dim('OPTIONS')}`);
+  console.log('');
+  [
+    ['--agent <id>', 'which coding agent (see: collagent agents)'],
+    ['--name <name>', 'your display name in the room'],
+    ['--server <url>', `session server (default ws://127.0.0.1:${DEFAULT_PORT})`],
+    ['--headless', "collagent's feed UI instead of the agent's own"],
+    ['--cwd <dir>', 'working directory for the agent'],
+    ['--model <model>', 'model override'],
+  ].forEach(row);
+  console.log('');
+  console.log(paint.dim('  advanced: --adapter <type> · --permission-mode <m> (headless; default acceptEdits) · --port/--host for serve'));
+  console.log('');
+}
 
 export async function run(argv) {
   const [command, ...rest] = argv;
@@ -60,7 +64,10 @@ export async function run(argv) {
     case 'serve': return cmdServe(opts);
     case 'create': return cmdCreate(opts);
     case 'open': return cmdOpen(opts);
+    case 'agents':
+    case 'agent': return cmdAgents();
     case 'rooms':
+    case 'room':
     case 'ls': return cmdRooms(opts);
     case 'join': return cmdJoin(opts);
     case 'status': return cmdStatus(opts);
@@ -71,13 +78,14 @@ export async function run(argv) {
     case 'help':
     case '--help':
     case '-h':
-      printLogo();
-      console.log(USAGE);
+      printHelp();
       await printRecentRooms(opts);
       return;
     default:
-      console.error(`unknown command: ${command}`);
-      console.log(USAGE);
+      // a stray flag means someone was exploring, not mistyping — just help them
+      if (command.startsWith('-')) return printHelp();
+      console.error(paint.red(`unknown command: ${command}`));
+      console.log(paint.dim('  collagent help shows everything — or just run: collagent create'));
       process.exitCode = 1;
   }
 }
@@ -123,6 +131,10 @@ async function cmdServe(opts) {
 }
 
 async function cmdCreate(opts) {
+  // Brand first, on every path — chooser, --agent, headless. The logo's
+  // tagline slot carries the action, same lockup as `rooms`.
+  printLogo('creating a room…');
+
   const adapterType = await resolveAdapter(opts);
   if (!adapterType) return; // chooser cancelled
 
@@ -149,6 +161,7 @@ async function cmdOpen(opts) {
     process.exitCode = 1;
     return;
   }
+  printLogo(`reopening room ${code}…`);
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
@@ -256,7 +269,11 @@ function noAgentsInstalled(runtimes) {
 const DEFAULT_RUNTIME = 'claude';
 
 const withAgentLabels = (rooms) =>
-  rooms.map((room) => ({ ...room, agentLabel: runtimeLabel(room.agentType) }));
+  rooms.map((room) => ({
+    ...room,
+    agentLabel: runtimeLabel(room.agentType),
+    agentGlyph: runtimeGlyph(room.agentType),
+  }));
 
 async function cmdRooms(opts) {
   const serverUrl = defaultServer(opts);
@@ -267,33 +284,84 @@ async function cmdRooms(opts) {
   const liveliness = (r) => ((r.participants ?? []).some((p) => p.connected) ? 1 : 0);
   rooms.sort((a, b) => liveliness(b) - liveliness(a) || (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
 
-  const notes = [];
-  if (offline) notes.push(paint.yellow('saved rooms on this machine'));
-  else if (!isLocalHost(serverUrl)) notes.push(paint.dim(`via ${new URL(serverUrl.replace(/^ws/, 'http')).host}`));
+  const live = rooms.filter((r) => (r.participants ?? []).some((p) => p.connected)).length;
+  const saved = rooms.length - live;
+  const counts = [live ? `${live} live` : null, saved ? `${saved} saved` : null]
+    .filter(Boolean).join(' · ');
+  // The logo's tagline slot carries the room counts — brand + context in one lockup.
+  const subtitle = [
+    counts ? `${counts} ${rooms.length === 1 ? 'room' : 'rooms'}` : 'no rooms yet',
+    offline ? 'server offline' : null,
+    !offline && !isLocalHost(serverUrl) ? `via ${new URL(serverUrl.replace(/^ws/, 'http')).host}` : null,
+  ].filter(Boolean).join(' · ');
 
-  console.log('');
-  console.log(`  ${wordmark()} ${paint.dim('·')} ${rooms.length} ${rooms.length === 1 ? 'room' : 'rooms'}${notes.length ? ` ${paint.dim('·')} ${notes.join(' ')}` : ''}`);
-  console.log('');
+  printLogo(subtitle);
   if (!rooms.length) {
-    console.log(paint.dim('  No rooms yet — start one with: ') + paint.bold('collagent create'));
+    console.log(paint.dim('  No rooms yet — start one with ') + paint.bold('collagent create'));
     console.log('');
     return;
   }
   console.log(renderRoomList(withAgentLabels(rooms), { homedir: os.homedir() }));
-  console.log(paint.dim('  collagent join <code> — jump in · collagent open <code> — reopen · collagent delete <code> — remove'));
-  console.log('');
+  printCommandBar([
+    ['collagent create', 'start a new room'],
+    ['collagent join <code>', 'jump into a room'],
+    ['collagent open <code>', 'reopen a room as host'],
+    ['collagent delete <code>', 'remove a room + its history'],
+  ]);
 }
 
 async function printRecentRooms(opts) {
   try {
     const { rooms } = await listRooms(defaultServer(opts));
     if (!rooms.length) return;
-    console.log(paint.bold('Recent rooms'));
+    console.log(` ${paint.green('▍')} ${paint.green(paint.bold('RECENT ROOMS'))}`);
     console.log('');
     console.log(renderRoomList(withAgentLabels(rooms.slice(0, 3)), { homedir: os.homedir(), header: false }));
     if (rooms.length > 3) console.log(paint.dim(`  …and ${rooms.length - 3} more — collagent rooms`));
     console.log('');
   } catch { /* listing is a bonus, never an error */ }
+}
+
+// The supported-runtime roster, in the same voice as the create chooser.
+function cmdAgents() {
+  const runtimes = runtimesWithInstallState().filter((r) => r.status === 'available');
+  const installed = runtimes.filter((r) => r.installed);
+  const missing = runtimes.filter((r) => !r.installed);
+
+  printLogo(`${runtimes.length} coding agents supported · ${installed.length} installed here`);
+
+  const labelW = Math.max(...runtimes.map((r) => r.label.length));
+  const idW = Math.max(...runtimes.map((r) => r.id.length));
+  const row = (r, note) =>
+    `  ${paint.accent(r.glyph ?? '●')}  ${paint.bold(r.label.padEnd(labelW))}  ${paint.dim(r.id.padEnd(idW))}  ${paint.dim(r.vendor.padEnd(10))}  ${paint.dim(note)}`;
+
+  if (installed.length) {
+    console.log(` ${paint.green('▍')} ${paint.green(paint.bold('INSTALLED'))}`);
+    console.log('');
+    for (const r of installed) console.log(row(r, r.note));
+    console.log('');
+  }
+  if (missing.length) {
+    console.log(` ${paint.dim('▍')} ${paint.dim('NOT INSTALLED')}`);
+    console.log('');
+    for (const r of missing) console.log(row(r, r.install ?? 'see vendor docs'));
+    console.log('');
+  }
+  printCommandBar([
+    ['collagent create', 'pick one interactively'],
+    ['collagent create --agent <id>', 'start a room with that agent'],
+  ]);
+}
+
+// Aligned command → description table; the quiet action bar under a listing.
+function printCommandBar(commands) {
+  const w = Math.max(...commands.map(([cmd]) => cmd.length)) + 4;
+  console.log(paint.dim(`  ${'─'.repeat(48)}`));
+  console.log('');
+  for (const [cmd, desc] of commands) {
+    console.log(`  ${paint.bold(cmd.padEnd(w))}${paint.dim(desc)}`);
+  }
+  console.log('');
 }
 
 /** Rooms from the live server, or read from history files when it's down. */
@@ -331,7 +399,8 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
   const mark = runtimeGlyph(adapterType);
   const banner = () => {
     console.log('');
-    console.log(`  ${paint.green('✓')} ${paint.bold(`Room ${verb}`)}  ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${label}`);
+    // The chip keeps the brand on the line people screenshot and share.
+    console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold(`Room ${verb}`)}  ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${label}`);
     console.log('');
     console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(`collagent join ${code}`)}${isRemoteable(serverUrl) ? ` ${paint.dim(`--server ${serverUrl}`)}` : ''}`);
     console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code))}`);
@@ -396,6 +465,7 @@ async function cmdJoin(opts) {
     process.exitCode = 1;
     return;
   }
+  printLogo(`joining room ${code}…`);
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
 
@@ -416,7 +486,7 @@ function enterRoomFeed({ client, welcome, name, code }) {
   const online = client.session.participants.filter((p) => p.connected).length;
   const topic = buildRoomSummary(welcome.events).title;
   console.log('');
-  console.log(`  ${paint.green('✓')} ${paint.bold("You're in")} ${paint.dim('·')} room ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${agentLabel} ${paint.dim('·')} ${online} ${online === 1 ? 'person' : 'people'} here`);
+  console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold("You're in")} ${paint.dim('·')} room ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${agentLabel} ${paint.dim('·')} ${online} ${online === 1 ? 'person' : 'people'} here`);
   if (topic) console.log(`    ${paint.dim('Topic:')} ${paint.bold(topic)}`);
   if (client.name !== name) {
     console.log(paint.yellow(`    heads-up: "${name}" was taken, so you're "${client.name}" here (--name picks another)`));
@@ -464,7 +534,7 @@ async function cmdStatus(opts) {
   }
   const s = await res.json();
   console.log('');
-  console.log(renderRoomList(withAgentLabels([s]), { homedir: os.homedir() }));
+  console.log(renderRoomList(withAgentLabels([s]), { homedir: os.homedir(), header: false }));
   console.log(renderPresence(s, null, { agentLabel: runtimeLabel(s.agentType) }));
   console.log(paint.dim(`  ${s.mode} mode · created ${ago(s.createdAt)} · invite: collagent join ${s.code}`));
   console.log('');
@@ -497,51 +567,80 @@ async function cmdLeave(opts) {
 }
 
 async function cmdDelete(opts) {
-  const code = (opts._[0] ?? '').toUpperCase();
-  if (!code) {
-    console.error('usage: collagent delete <code> [--yes]');
-    process.exitCode = 1;
-    return;
-  }
   const serverUrl = defaultServer(opts);
   if (isLocalHost(serverUrl)) await ensureServer(serverUrl).catch(() => {});
   const online = Boolean(await serverHealth(serverUrl));
+  const code = (opts._[0] ?? '').toUpperCase();
 
-  const room = await findRoom(code, serverUrl, online);
-  if (!room) {
-    console.error(`No room ${code}.`);
-    process.exitCode = 1;
-    return;
+  let targets;
+  if (code) {
+    const room = await findRoom(code, serverUrl, online);
+    if (!room) {
+      console.error(`No room ${code}.`);
+      process.exitCode = 1;
+      return;
+    }
+    targets = [{ ...room, code }];
+  } else {
+    // no code: list the rooms and let the user check off what goes
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      console.error('usage: collagent delete <code> [--yes]  (interactive picker needs a terminal)');
+      process.exitCode = 1;
+      return;
+    }
+    const { rooms } = await listRooms(serverUrl);
+    if (!rooms.length) return console.log(paint.dim('  No rooms to delete.'));
+    rooms.sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+    console.log('');
+    targets = await pickRooms(rooms);
+    if (!targets?.length) return console.log(paint.dim('  Cancelled — nothing deleted.'));
   }
 
   if (!opts.yes) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      console.error(`refusing to delete room ${code} without confirmation — rerun with --yes`);
+      console.error(`refusing to delete room${targets.length === 1 ? '' : 's'} without confirmation — rerun with --yes`);
       process.exitCode = 1;
       return;
     }
-    const peopleIn = (room.participants ?? []).some((p) => p.connected);
+    const codes = targets.map((t) => t.code).join(', ');
+    const peopleIn = targets.some((t) => (t.participants ?? []).some((p) => p.connected));
     console.log('');
     const sure = await confirmDanger({
-      title: `Delete room ${code} · ${runtimeLabel(room.agentType)}${room.title ? ` · “${room.title}”` : ''}?`,
+      title: targets.length === 1
+        ? `Delete room ${codes} · ${runtimeLabel(targets[0].agentType)}${targets[0].title ? ` · “${targets[0].title}”` : ''}?`
+        : `Delete ${targets.length} rooms · ${codes}?`,
       detail: peopleIn
-        ? 'People are in this room right now — it ends for everyone, and its history is erased.'
-        : 'Its history will be erased. This cannot be undone.',
+        ? 'People are in there right now — it ends for everyone, and the history is erased.'
+        : `${targets.length === 1 ? 'Its history' : 'Their history'} will be erased. This cannot be undone.`,
+      yes: targets.length === 1 ? 'Yes, delete it' : `Yes, delete ${targets.length} rooms`,
+      no: targets.length === 1 ? 'No, keep it' : 'No, keep them',
     });
-    if (!sure) return console.log(paint.dim(`  Cancelled — room ${code} kept.`));
+    if (!sure) return console.log(paint.dim('  Cancelled — nothing deleted.'));
   }
 
-  if (online) {
-    const res = await fetch(`${httpUrl(serverUrl)}/api/sessions/${code}`, { method: 'DELETE' });
-    if (res.ok) return console.log(`Room ${code} deleted.`);
-  } else {
-    try {
-      fs.unlinkSync(path.join(defaultDataDir(), 'history', `${code}.jsonl`));
-      return console.log(`Room ${code} deleted.`);
-    } catch { /* fall through */ }
+  for (const t of targets) {
+    if (await deleteOneRoom(t.code, serverUrl, online)) {
+      console.log(`  ${paint.green('✓')} room ${t.code} deleted`);
+    } else {
+      console.error(`  ${paint.red('✗')} could not delete room ${t.code}`);
+      process.exitCode = 1;
+    }
   }
-  console.error(`Could not delete room ${code}.`);
-  process.exitCode = 1;
+}
+
+async function deleteOneRoom(code, serverUrl, online) {
+  if (online) {
+    try {
+      const res = await fetch(`${httpUrl(serverUrl)}/api/sessions/${code}`, { method: 'DELETE' });
+      if (res.ok) return true;
+    } catch { /* fall back to the history file */ }
+  }
+  try {
+    fs.unlinkSync(path.join(defaultDataDir(), 'history', `${code}.jsonl`));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // A room's summary from the live server, or from its history file when offline.

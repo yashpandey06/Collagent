@@ -103,93 +103,81 @@ export function shortPath(p, homedir) {
   return homedir && p.startsWith(homedir) ? '~' + p.slice(homedir.length) : p;
 }
 
-function roomState(room) {
-  if (room.ended) return { icon: '■', text: 'ended', tint: paint.dim };
-  if (room.offline) return { icon: '○', text: 'saved', tint: paint.dim };
-  const online = (room.participants ?? []).filter((p) => p.connected).length;
-  switch (room.status) {
-    case 'working': return { icon: '◐', text: 'working', tint: paint.yellow };
-    case 'paused': return { icon: '⏸', text: 'paused', tint: paint.yellow };
-    case 'waiting_agent':
-      return online
-        ? { icon: '◌', text: 'no agent', tint: paint.cyan }
-        : { icon: '○', text: 'saved', tint: paint.dim };
-    default: return { icon: '●', text: room.status, tint: paint.green };
+const isLive = (room) => (room.participants ?? []).some((p) => p.connected);
+
+// "alice* bob +1" (connected) or "was alice +2" (past roster); '' when empty.
+export function roomPeopleText(room) {
+  const online = (room.participants ?? []).filter((p) => p.connected);
+  if (online.length) {
+    const names = online.slice(0, 2)
+      .map((p) => `${p.name}${p.id === room.driverId ? '*' : ''}`)
+      .join(' ');
+    return `${names}${online.length > 2 ? ` +${online.length - 2}` : ''}`;
   }
+  const ever = room.participantsEver ?? [];
+  if (!ever.length) return '';
+  return `was ${ever[0]}${ever.length > 1 ? ` +${ever.length - 1}` : ''}`;
 }
 
 function roomPeople(room) {
-  const online = (room.participants ?? []).filter((p) => p.connected);
-  if (online.length) {
-    const shown = online.slice(0, 3)
-      .map((p) => `${p.name}${p.id === room.driverId ? '*' : ''}`)
-      .join(' ');
-    const more = online.length > 3 ? ` +${online.length - 3}` : '';
-    return { text: `${online.length} · ${shown}${more}`, live: true };
-  }
-  const ever = room.participantsEver ?? [];
-  if (!ever.length) return { text: 'empty', live: false };
-  const shown = ever.slice(0, 3).join(', ');
-  const more = ever.length > 3 ? ` +${ever.length - 3}` : '';
-  return { text: `was ${shown}${more}`, live: false };
+  const text = roomPeopleText(room);
+  if (!text) return null;
+  return isLive(room) ? paint.green(`● ${text}`) : text;
 }
 
+const folderName = (cwd) => {
+  const base = String(cwd ?? '').split('/').filter(Boolean).at(-1);
+  return base ? truncate(base, 24) + '/' : null;
+};
+
 /**
- * Room listing for `collagent rooms`:
+ * Room listing for `collagent rooms`. Everything hugs the left edge — no
+ * columns, no right-aligned meta — so nothing floats on wide terminals:
  *
- *     CODE    AGENT         STATUS    PEOPLE           TOPIC
- *   ● ZADU8   Claude Code   idle      2 · Alice* Bob   Add OAuth validation
- *       └ Bob › add oauth validation…   ~/dev/api · 2m ago · 47 events
+ *   ● WTEYA  “Add OAuth callback validation”
+ *            ✳ Claude Code · ● Alice* Bob · api/ · 2m ago
  */
 export function renderRoomList(rooms, {
-  homedir = '',
   width = process.stdout.columns || 100,
   header = true,
 } = {}) {
   if (!rooms.length) return '';
-  const agentW = Math.max('AGENT'.length, ...rooms.map((r) => (r.agentLabel ?? 'agent').length));
-  const statusW = Math.max('STATUS'.length, ...rooms.map((r) => roomState(r).text.length));
-  const peopleW = Math.min(28, Math.max('PEOPLE'.length, ...rooms.map((r) => roomPeople(r).text.length)));
-  const topicW = Math.max(16, width - (9 + agentW + statusW + peopleW + 8));
+  const W = Math.max(56, Math.min(width - 2, 92));
+  const dot = paint.dim(' · ');
 
   const lines = [];
-  if (header) {
-    lines.push(paint.dim([
-      '   CODE  ',
-      'AGENT'.padEnd(agentW),
-      'STATUS'.padEnd(statusW),
-      'PEOPLE'.padEnd(peopleW),
-      'TOPIC',
-    ].join('  ')));
-  }
+  let group = null;
 
   for (const room of rooms) {
-    const state = roomState(room);
-    const people = roomPeople(room);
-    const peopleCell = people.text.length > peopleW
-      ? people.text.slice(0, peopleW - 1) + '…'
-      : people.text.padEnd(peopleW);
-    const topic = truncate(room.title ?? '', topicW);
-    lines.push([
-      ` ${state.tint(state.icon)} ${paint.bold(room.code.padEnd(6))}`,
-      (room.agentLabel ?? 'agent').padEnd(agentW),
-      state.tint(state.text.padEnd(statusW)),
-      people.live ? paint.green(peopleCell) : paint.dim(peopleCell),
-      topic ? paint.bold(topic) : paint.dim('—'),
-    ].join('  '));
-
-    const dir = shortPath(room.cwd, homedir);
-    const meta = `${dir ? `${dir} · ` : ''}${ago(room.lastActivity)} · ${room.eventCount ?? 0} events`;
-    if (room.lastInstruction?.text) {
-      const speaker = `${room.lastInstruction.name} › `;
-      const budget = Math.max(20, width - meta.length - speaker.length - 14);
-      const text = room.lastInstruction.text.length > budget
-        ? room.lastInstruction.text.slice(0, budget) + '…'
-        : room.lastInstruction.text;
-      lines.push(`      ${paint.dim('└')} ${paint.cyan(speaker)}${text}  ${paint.dim(meta)}`);
-    } else {
-      lines.push(`      ${paint.dim(`└ ${meta}`)}`);
+    const live = isLive(room);
+    if (header) {
+      const g = live ? 'live' : 'saved';
+      if (g !== group) {
+        group = g;
+        lines.push(live
+          ? ` ${paint.green('▍')} ${paint.green(paint.bold('LIVE'))}`
+          : ` ${paint.dim('▍')} ${paint.dim('SAVED')}`);
+        lines.push('');
+      }
     }
+
+    // Line 1 — identity: the code as a solid chip (coral = live, gray = saved),
+    // then the topic. The chip is the display type of the screen.
+    const chip = live ? paint.chip(room.code.padEnd(5)) : paint.chipDim(room.code.padEnd(5));
+    const title = room.title ? `“${truncate(room.title, W - 14)}”` : paint.dim('(no topic)');
+    lines.push(` ${chip}  ${live && room.title ? paint.bold(title) : title}`);
+
+    // Line 2 — one dim run of facts, hanging under the topic.
+    const agent = `${room.agentGlyph ? `${room.agentGlyph} ` : ''}${room.agentLabel ?? 'agent'}`;
+    const parts = [live ? agent : paint.dim(agent)];
+    if (room.status === 'working') parts.push(paint.yellow('working…'));
+    if (room.status === 'paused') parts.push(paint.yellow('paused'));
+    const people = roomPeople(room);
+    if (people) parts.push(live ? people : paint.dim(people));
+    const folder = folderName(room.cwd);
+    if (folder) parts.push(paint.dim(folder));
+    parts.push(paint.dim(ago(room.lastActivity)));
+    lines.push(`          ${parts.join(dot)}`);
     lines.push('');
   }
   return lines.join('\n');
@@ -223,7 +211,12 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
     rl.prompt(true);
   };
 
-  client.on('event', (event) => println(renderEvent(event, { selfId: client.self?.participantId, agentLabel })));
+  client.on('event', (event) => {
+    // your own instruction echoes back from the server — the prompt line
+    // you just typed is already on screen, so don't print it twice
+    if (event.kind === 'instruction' && event.actor?.id === client.self?.participantId) return;
+    println(renderEvent(event, { selfId: client.self?.participantId, agentLabel }));
+  });
   client.on('session', () => {}); // presence shown on demand via /participants
   client.on('server-error', (message) => println(paint.red(`! ${message}`)));
   client.on('disconnected', () => println(paint.red('· connection lost — reconnecting…')));

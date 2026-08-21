@@ -91,24 +91,42 @@ collagent create            create a shared room and launch Claude Code
 collagent join <code>       join a room (replays the room's full history)
 collagent open <code>       reopen a stored room as host and re-attach Claude Code
 collagent rooms             list all rooms — who's in them, last activity, where
+collagent agents            list the coding agents collagent supports (and what's installed)
 collagent status <code>     show one room's state + participants
 collagent leave             leave the last room you joined
-collagent delete <code>     delete a room and its history (asks first; --yes skips)
+collagent delete [code]     delete rooms — bare `delete` opens a checkbox picker, then confirms
 collagent serve             run a standalone session server
 ```
 
 `collagent rooms` (also bare `collagent`) shows every room — live rooms with people in them first — with the coding agent, who's there (and how many), the last instruction, the working directory, and recency:
 
 ```text
-  ◉ collagent · 2 rooms
+    ●     ●
+     ╲   ╱
+      ╲ ╱
+       ◉       C O L L A G E N T
+       │       1 live · 1 saved rooms
+       ●
 
-   CODE    AGENT        STATUS  PEOPLE          FOLDER
- ● 7FK2P   Claude Code  idle    2 · Alice* Bob  ~/dev/api
-      └ Bob › add oauth validation to the login flow   2m ago · 47 events
+ ▍ LIVE
 
- ○ ZADU8   Codex        saved   was Alice, Bob  ~/dev/api
-      └ Alice › does history survive a server restart?  15m ago · 17 events
+  7FK2P   “Add OAuth callback validation”
+          ✳ Claude Code · ● Alice* Bob · api/ · 2m ago
+
+ ▍ SAVED
+
+  ZADU8   “does history survive a server restart?”
+          ⬡ Codex · was Alice +1 · api/ · 15m ago
+
+  ────────────────────────────────────────────────
+
+  collagent create           start a new room
+  collagent join <code>      jump into a room
+  collagent open <code>      reopen a room as host
+  collagent delete <code>    remove a room + its history
 ```
+
+(Room codes render as solid color chips in the terminal — coral for live rooms, gray for saved.)
 
 It works even when the server is down (reads stored history from disk), and outdated local servers are restarted automatically — rooms survive restarts.
 
@@ -175,6 +193,8 @@ AgentAdapter
 ```
 
 Adapters emit **normalized events** — `agent_status`, `agent_message`, `tool_use`, `tool_result`, `result`, `error`, plus `local_prompt` and `notice` from adapters that watch a native UI — so the core never sees runtime-specific shapes.
+
+**The transparency guarantee:** every adapter mirrors the agent's replies into the room as `agent_message`, so all participants see what the agent said — not just its tool calls. `test/feed-parity.test.js` enforces this for every registered runtime; adding an adapter without a reply path fails the suite.
 
 New runtimes register in `src/adapters/registry.js`, which also carries each adapter's **capabilities**, so no caller has to branch on an adapter's name:
 
@@ -252,7 +272,7 @@ Because this adapter sees every item the thread streams, Codex app-server rooms 
 
 Cursor's CLI (`agent`, installed via `curl https://cursor.com/install -fsS | bash`) gets the same two shapes.
 
-**`cursor-native`** runs the real interactive `agent` in a PTY and observes it through Cursor's hook system (`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, `postToolUse`, `afterAgentResponse`, `stop`, `sessionEnd`). Cursor reads hooks from several levels and symlink-checks the config files, so the adapter merges its forwarder into the **workspace's `.cursor/hooks.json`** and restores the original file byte-for-byte on disconnect — user- and enterprise-level hooks keep running untouched. Cursor's hooks are richer than Claude Code's: `afterAgentResponse` carries the agent's prose directly (no transcript tailing) and `stop` reports a real `completed|aborted|error` status. Remote instructions are typed into Cursor's own prompt box as `[Bob] …`, visibly.
+**`cursor-native`** runs the real interactive `agent` in a PTY and observes it by **tailing Cursor's own chat store** (`~/.cursor/chats/<md5(cwd)>/<chatId>/store.db`, SQLite read via `node:sqlite`, Node 22.5+). Current Cursor CLI builds ship hooks.json machinery but never execute it (verified against a live install), so the chat store is the transparent feed — and it carries everything: the agent's prose, tool calls with args, tool results with exit codes, the host's own prompts, and the chat title. Reasoning blocks stay private, an assistant record with prose and no tool calls closes the turn, and `collagent open` re-attaches to the same chat via `--resume <chatId>` without re-broadcasting history. Remote instructions are typed into Cursor's own prompt box as `[Bob] …`, visibly.
 
 **`cursor`** (headless) drives `agent -p --output-format stream-json`. Print mode is one-shot, so each instruction spawns one process; turns share a conversation via `--resume <session_id>`, captured from the first turn's `init` event. Instructions arriving mid-turn queue until the running turn ends. Runs with `--force` by default (pass it off with adapter options) — like every headless room, invitees can drive the host's machine, so choose deliberately.
 
@@ -294,7 +314,7 @@ npm run demo    # full end-to-end against REAL Claude Code (needs `claude` insta
 - `test/server.test.js` — the full milestone flow over real WebSockets with the mock adapter, plus pause/resume, driver-mode/handoff, reconnect replay, status API.
 - `test/claude-adapter.test.js` — stream-json normalization, and the adapter driving `test/fixtures/fake-claude.js`, a stub that speaks Claude Code's exact stream-json protocol.
 - `test/codex.test.js` — app-server and hook translation, the registry's capability descriptors, and the adapter driving `test/fixtures/fake-codex-app-server.js`, a stub that reproduces Codex's JSON-RPC quirks (no `jsonrpc` field, `emittedAtMs` on notifications).
-- `test/cursor.test.js` — hook translation, the project-level `hooks.json` merge/restore, stream-json normalization, and the adapter driving `test/fixtures/fake-cursor-agent.js`, a stub that speaks Cursor's print-mode protocol (tool calls keyed by `<name>ToolCall`, `--resume` chaining).
+- `test/cursor.test.js` — chat-store record translation, a live SQLite tail against a fixture store (attach, title, reply, resume-without-replay), stream-json normalization, and the adapter driving `test/fixtures/fake-cursor-agent.js`, a stub that speaks Cursor's print-mode protocol (tool calls keyed by `<name>ToolCall`, `--resume` chaining).
 - `test/acp.test.js` — the shared ACP client against `test/fixtures/fake-acp-agent.js` (chunk coalescing, permission policy, `session/load` resume, pause queueing).
 - `test/gemini.test.js`, `test/opencode.test.js`, `test/goose.test.js` — per-runtime hook/SSE translation, settings- and plugin-dir install/restore, registry descriptors.
 - `scripts/e2e-demo.js` — the first-milestone proof: Alice creates → Bob joins → Bob instructs → real Claude Code writes a file → both feeds verified identical → pause/resume/handoff exercised.

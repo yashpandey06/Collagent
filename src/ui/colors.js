@@ -15,6 +15,9 @@ export const paint = {
   /** Node fill: bright on dark terminals, standing in for the logo's ink. */
   ink: (s) => c('1;97', s),
   invert: (s) => c('7', s),
+  /** Solid label chips — the closest a terminal gets to display type. */
+  chip: (s) => c('48;5;209;38;5;232;1', ` ${s} `),
+  chipDim: (s) => c('48;5;236;38;5;250', ` ${s} `),
 };
 
 export { useColor };
