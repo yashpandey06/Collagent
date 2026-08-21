@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine } from '../instruction-format.js';
 import { VERSION } from '../../version.js';
 import { encode, isRequest, isResponse, translateAcpUpdate, turnEnd } from './protocol.js';
 
@@ -110,13 +111,12 @@ export class AcpAdapter extends AgentAdapter {
 
   async _prompt({ text, from }) {
     if (!this.sessionId) return { queued: false };
-    const speaker = from?.name ? `[${from.name}] ` : '';
     this.busy = true;
     this.emit({ kind: 'agent_status', status: 'working' });
     try {
       const res = await this._request('session/prompt', {
         sessionId: this.sessionId,
-        prompt: [{ type: 'text', text: `${speaker}${text}` }],
+        prompt: [{ type: 'text', text: formatInstructionLine({ text, from }) }],
       }, 600_000);
       for (const event of turnEnd(res?.stopReason, this._buffer)) this.emit(event);
     } catch (err) {

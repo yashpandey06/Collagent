@@ -1,6 +1,6 @@
 {
   "name": "collagent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Multiplayer infrastructure for AI agents \u2014 shared live sessions for Claude Code (and future agent runtimes)",
   "type": "module",
   "bin": {

@@ -129,6 +129,8 @@ export function eventLines(event, width) {
       return [`${t} ${paint.yellow(`🔔 ${clip(String(data.message ?? ''), bodyWidth - 10)}`)}`];
     case 'session_ended':
       return [`${t} ${paint.red(`■ session ended by ${actor.name}`)}`];
+    case 'room_closed':
+      return [`${t} ${paint.red(`■ room closed — ${data.reason ?? 'the host left'}`)} ${paint.dim('(still saved)')}`];
     case 'error':
       return [`${t} ${paint.red(`! ${clip(String(data.message ?? ''), bodyWidth - 4)}`)}`];
     default:

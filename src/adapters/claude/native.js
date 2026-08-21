@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine, isSlashCommand } from '../instruction-format.js';
 import { token } from '../../core/ids.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -241,15 +242,16 @@ export class ClaudeNativeAdapter extends AgentAdapter {
   }
 
   _inject({ text, from }) {
-    const speaker = from?.name ? `[${from.name}] ` : '';
-    const line = `${speaker}${text}`;
+    const line = formatInstructionLine({ text, from });
     // Record before writing so the UserPromptSubmit echo is always recognized.
     this._recentInjections.push({ text: line, ts: Date.now() });
     if (this._recentInjections.length > 20) this._recentInjections.shift();
     if (!this.pty) return { queued: false };
     this.pty.write(`\x1b[200~${line}\x1b[201~`);
     setTimeout(() => this.pty?.write('\r'), 150);
-    this.emit({ kind: 'agent_status', status: 'working' });
+    // Slash commands drive the runtime's own UI (model picker, permissions…)
+    // and never fire a Stop hook, so "working" would stick until the next turn.
+    if (!isSlashCommand(text)) this.emit({ kind: 'agent_status', status: 'working' });
     return { queued: false };
   }
 

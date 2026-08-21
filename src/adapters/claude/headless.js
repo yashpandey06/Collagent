@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine } from '../instruction-format.js';
 import { uuid } from '../../core/ids.js';
 
 /**
@@ -130,10 +131,9 @@ export class ClaudeCodeAdapter extends AgentAdapter {
       this._spawn({ resume: true });
       this.emit({ kind: 'agent_status', status: 'starting', detail: { resumed: true } });
     }
-    const speaker = from?.name ? `[${from.name}] ` : '';
     const payload = {
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: `${speaker}${text}` }] },
+      message: { role: 'user', content: [{ type: 'text', text: formatInstructionLine({ text, from }) }] },
     };
     this.busy = true;
     this.emit({ kind: 'agent_status', status: 'working' });

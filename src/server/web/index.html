@@ -66,7 +66,7 @@
 
 <div id="feed" class="hidden"></div>
 <div id="composer" class="hidden">
-  <input id="text" placeholder="send an instruction to the shared agent…">
+  <input id="text" placeholder="send an instruction — /commands run in the shared agent…">
   <button id="sendBtn">Send</button>
 </div>
 
@@ -187,6 +187,9 @@ function renderEvent(e) {
     case 'control_transferred': return addLine(`⇄ control handed to ${d.to && d.to.name}`, 'user');
     case 'mode_changed': return addLine(`⚑ mode: ${d.mode}`, 'user');
     case 'session_ended': return addLine(`■ session ended by ${who}`, 'err');
+    case 'room_closed':
+      $('composer').classList.add('hidden');
+      return addLine(`■ room closed — ${d.reason || 'the host left'} (history saved)`, 'err');
     case 'agent_status':
       if (d.status === 'working') return addLine(`· ${agentLabel()} is working…`, 'dim');
       if (d.status === 'ready') return addLine(`· ${agentLabel()} ready`, 'dim');

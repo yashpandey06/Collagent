@@ -80,7 +80,7 @@ $ collagent join 7FK2P --name Bob --server ws://<alice-ip>:7717
 › Add OAuth callback validation.
 ```
 
-Both terminals now show the same live feed: who joined, every instruction, Claude Code's messages, each tool call and result, and turn completions. Either participant can send instructions; the agent sees who is speaking (`[Bob] Add OAuth callback validation.`).
+Both terminals now show the same live feed: who joined, every instruction, Claude Code's messages, each tool call and result, and turn completions. Either participant can send instructions; the agent sees who is speaking (`[Bob] Add OAuth callback validation.`). The agent's slash commands work from Bob's terminal too — `/model` or `/permissions` typed by any participant runs in the shared agent's UI just as if the host had typed it (see [In-session commands](#in-session-commands)).
 
 A minimal web page for joining/viewing (no dashboard) is served at `http://<server>:7717/?code=7FK2P`.
 
@@ -134,6 +134,8 @@ It works even when the server is down (reads stored history from disk), and outd
 
 Every room's event history is persisted to `~/.collagent/history/<code>.jsonl` and **rooms survive server restarts** — the server restores them from disk on boot. Joining a room replays its entire history (instructions, agent messages, tool activity, joins/leaves), so newcomers are fully caught up. Closing Claude Code leaves the room stored; `collagent open <code>` reopens it as host and re-attaches Claude Code — in native mode it passes `--resume <claude-session-id>` so the actual Claude Code conversation continues where it left off. A room only disappears when the host ends it explicitly with `/end`.
 
+**When the host goes away, the live room closes for everyone.** The host's machine runs the agent, so a room without its host is dead air — on every supported runtime. When the host leaves (or their connection drops and doesn't come back within a short grace window), remaining participants see `■ room closed — host left` and are disconnected instead of typing instructions that can queue nowhere. The room stays stored: `collagent open <code>` revives it, and the first person to join a host-less room becomes its new host.
+
 `create` auto-starts a local session server if none is running. For cross-machine use, run `collagent serve` somewhere reachable and pass `--server ws://host:7717` to both `create` and `join`.
 
 ### In-session commands
@@ -149,7 +151,7 @@ Every room's event history is persisted to `~/.collagent/history/<code>.jsonl` a
 /quit                leave
 ```
 
-Anything that isn't a `/command` is sent to the shared Claude Code agent.
+Anything that isn't one of these room commands is sent to the shared agent — **including the agent's own slash commands**. A participant typing `/model`, `/permissions`, or `/compact` runs that command inside the shared agent's UI exactly as if the host had typed it, on every supported runtime (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Goose). Slash commands are delivered bare — no `[Bob]` speaker tag, which would demote them to prose — and the room feed still records who ran what. When collagent owns a name (like `/status`), `//status` force-sends it to the agent instead. Command access follows the same rules as instructions: everyone in open mode, driver/host in driver mode.
 
 ## Architecture
 
@@ -226,7 +228,7 @@ Multiplayer **around** the real interactive Claude Code UI, never instead of it.
 
 1. **PTY passthrough** — `collagent create` launches your normal `claude` inside a pseudo-terminal and pipes keys/screen through byte-for-byte. Plan mode, permission prompts, pickers: all native, all answered by the host.
 2. **Hooks + status line** (documented Claude Code features) — a `--settings` overlay registers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop` and `SessionEnd` hooks. Each fires a tiny forwarder (`bin/collagent-hook.js`) that POSTs the payload to a loopback receiver; the adapter translates it into normalized events for remote participants. No output scraping. The same overlay sets a `statusLine` command (`bin/collagent-statusline.js`) so the session code, invite command and live participant presence render at the bottom of the native UI. (If you already use a custom status line, Collagent's takes over for shared sessions only.)
-3. **Composer injection** — a remote instruction is typed into Claude Code's own prompt box (bracketed paste + Enter) as `[Bob] …`, visibly. Instructions arriving before `SessionStart` (or while paused) are queued. The `UserPromptSubmit` echo of an injected instruction is deduplicated so remote users don't see it twice.
+3. **Composer injection** — a remote instruction is typed into Claude Code's own prompt box (bracketed paste + Enter) as `[Bob] …`, visibly. Slash commands (`/model`, `/permissions`, …) are injected **bare** so Claude Code parses them as commands rather than prose — attribution stays in the room feed, and command injections don't flip the room to "working" (commands never fire a `Stop` hook, so the status would stick). Instructions arriving before `SessionStart` (or while paused) are queued. The `UserPromptSubmit` echo of an injected instruction is deduplicated so remote users don't see it twice.
 4. **Transcript mirroring** — hooks report tool activity but never the agent's prose, so the adapter also tails the session transcript (a documented artifact whose path every hook payload carries) and mirrors new assistant text to participants as it lands. Remote users see Claude's replies, not just its tool calls.
 
 What the host types locally is shared too: `UserPromptSubmit` hooks surface it to participants as `⌨ host terminal › …`.

@@ -1,4 +1,5 @@
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine, isSlashCommand } from '../instruction-format.js';
 import { CursorChatTail } from './store.js';
 
 /**
@@ -122,14 +123,14 @@ export class CursorNativeAdapter extends AgentAdapter {
   }
 
   _inject({ text, from }) {
-    const speaker = from?.name ? `[${from.name}] ` : '';
-    const line = `${speaker}${text}`;
+    const line = formatInstructionLine({ text, from });
     this._recentInjections.push({ text: line, ts: Date.now() });
     if (this._recentInjections.length > 20) this._recentInjections.shift();
     if (!this.pty) return { queued: false };
     this.pty.write(`\x1b[200~${line}\x1b[201~`);
     setTimeout(() => this.pty?.write('\r'), 150);
-    this.emit({ kind: 'agent_status', status: 'working' });
+    // Slash commands drive the runtime's own UI, not a turn — no "working".
+    if (!isSlashCommand(text)) this.emit({ kind: 'agent_status', status: 'working' });
     return { queued: false };
   }
 

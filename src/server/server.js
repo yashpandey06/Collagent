@@ -17,12 +17,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *   server → participant: session_created | welcome | event | session | error
  *   server → agent host:  agent_attached | instruction | pause | resume | handoff | end
  */
-export function createCollagentServer({ dataDir, log = () => {} } = {}) {
+export function createCollagentServer({ dataDir, log = () => {}, hostGraceMs = 10_000 } = {}) {
   const manager = new SessionManager({ dataDir });
   const restored = manager.restore();
   if (restored) log(`restored ${restored} room(s) from history`);
   const participantConns = new Map(); // code -> Set<ws>
   const agentConns = new Map(); // code -> ws
+  const closeTimers = new Map(); // code -> timeout: pending host-departure close
 
   const httpServer = http.createServer((req, res) => handleHttp(req, res));
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -172,6 +173,10 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
     participantConns.get(session.code)?.delete(ws);
     ws._ctx = { role: null, code: null, participantId: null };
     broadcastSession(session);
+    // An explicit leave never comes back — no grace window.
+    if (participant.role === 'host' && !hasConnectedHost(session)) {
+      closeLiveRoom(session, `host ${participant.name} left`);
+    }
   }
 
   // ---- agent adapter connection ----------------------------------------
@@ -277,6 +282,7 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
         break;
       }
       case 'end': {
+        cancelPendingClose(session.code);
         broadcastEvent(session, session.append('session_ended', userActor(participant), {}));
         if (agentWs) send(agentWs, { type: 'end' });
         session.status = 'ended';
@@ -294,6 +300,7 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
 
   // Ends a live room (everyone is disconnected) and removes its history.
   function deleteRoom(code) {
+    cancelPendingClose(code);
     const session = manager.get(code);
     if (session) {
       broadcastEvent(session, session.append('session_ended', sysActor(), { deleted: true }));
@@ -308,6 +315,31 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
 
   // ---- helpers -----------------------------------------------------------
 
+  function hasConnectedHost(session) {
+    return [...session.participants.values()].some((p) => p.role === 'host' && p.connected);
+  }
+
+  function cancelPendingClose(code) {
+    clearTimeout(closeTimers.get(code));
+    closeTimers.delete(code);
+  }
+
+  // The host's machine runs the agent, so a room without a connected host is
+  // dead air — instructions would queue nowhere, on every runtime. Tell the
+  // remaining participants why and disconnect them, but keep the room stored:
+  // `collagent open <code>` re-attaches an agent and revives it.
+  function closeLiveRoom(session, reason) {
+    cancelPendingClose(session.code);
+    if (session.status === 'ended' || hasConnectedHost(session)) return;
+    broadcastEvent(session, session.append('room_closed', sysActor(), { reason, code: session.code }));
+    session.agentStatus = 'disconnected';
+    applyAgentStatus(session, /* force */ true);
+    broadcastSession(session);
+    for (const conn of participantConns.get(session.code) ?? []) conn.close();
+    agentConns.get(session.code)?.close();
+    log(`room ${session.code} closed (${reason}) — stored, reopen with: collagent open ${session.code}`);
+  }
+
   function applyAgentStatus(session, force = false) {
     if (session.status === 'ended') return;
     if (session.status === 'paused' && !force) return; // pause gate wins
@@ -319,6 +351,7 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
     ws._ctx = { role: 'participant', code: session.code, participantId: participant.id };
     if (!participantConns.has(session.code)) participantConns.set(session.code, new Set());
     participantConns.get(session.code).add(ws);
+    if (participant.role === 'host') cancelPendingClose(session.code);
   }
 
   function resolveParticipant(ws) {
@@ -340,6 +373,15 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
         p.connected = false;
         broadcastEvent(session, session.append('participant_disconnected', userActor(p), {}));
         broadcastSession(session);
+        // A dropped host may be a network blip — close only if nobody
+        // hosting reconnects within the grace window.
+        if (p.role === 'host' && !hasConnectedHost(session) && session.status !== 'ended') {
+          cancelPendingClose(session.code);
+          closeTimers.set(session.code, setTimeout(
+            () => closeLiveRoom(session, `host ${p.name} disconnected`),
+            hostGraceMs,
+          ));
+        }
       }
     } else if (role === 'agent') {
       if (agentConns.get(code) === ws) agentConns.delete(code);
@@ -381,6 +423,8 @@ export function createCollagentServer({ dataDir, log = () => {} } = {}) {
       return new Promise((resolve) => httpServer.listen(port, host, () => resolve(httpServer.address())));
     },
     close() {
+      for (const timer of closeTimers.values()) clearTimeout(timer);
+      closeTimers.clear();
       for (const ws of wss.clients) ws.terminate();
       return new Promise((resolve) => httpServer.close(resolve));
     },

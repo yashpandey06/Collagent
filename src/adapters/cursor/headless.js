@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine } from '../instruction-format.js';
 
 /**
  * Drives the Cursor CLI headless (`agent -p --output-format stream-json`).
@@ -52,9 +53,8 @@ export class CursorAgentAdapter extends AgentAdapter {
       extraArgs = [],
     } = this.options;
 
-    const speaker = from?.name ? `[${from.name}] ` : '';
     const args = [
-      '-p', `${speaker}${text}`,
+      '-p', formatInstructionLine({ text, from }),
       '--output-format', 'stream-json',
       ...(this.sessionId ? ['--resume', this.sessionId] : []),
       ...(force ? ['--force'] : []),

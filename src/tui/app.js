@@ -103,6 +103,12 @@ export function runApp({ serverUrl, name, startRoom = null }) {
 
         roomClient.on('event', (e) => {
           if (screen !== 'room') return;
+          if (e.kind === 'room_closed') {
+            // the host is gone; the server is about to drop us — back to the
+            // lobby rather than reconnecting into a dead room
+            browser.message = `${room.code} closed — ${e.data?.reason ?? 'the host left'} · still saved, open it to re-attach`;
+            return leaveRoomToBrowser();
+          }
           appendLiveEvent(room, e, Math.max(40, term.size.cols - 6));
           saveRoomProgress();
           draw();

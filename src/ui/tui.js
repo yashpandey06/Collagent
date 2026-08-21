@@ -62,6 +62,9 @@ export function renderEvent(event, { selfId, agentLabel = 'agent' } = {}) {
       return paint.cyan(`⚑ mode set to ${data.mode} by ${name}`);
     case 'session_ended':
       return paint.red(`■ session ended by ${name}`);
+    case 'room_closed':
+      return paint.red(`■ room closed — ${data.reason ?? 'the host left'}`) +
+        (data.code ? `\n${paint.dim(`  history is saved — reopen with: collagent open ${data.code}`)}` : '');
     case 'session_title':
       return null; // room metadata, not feed content
     case 'error':
@@ -192,8 +195,32 @@ const HELP = `
   /mode open|driver    open: anyone can instruct; driver: only the driver
   /end                 end the session for everyone (host)
   /quit                leave the session
+  /<agent command>     any other slash command runs in the shared agent
+                       itself (/model, /permissions, /compact, …)
+  //<command>          force a command to the agent when collagent owns the
+                       name (e.g. //status runs the agent's /status)
   anything else        sent as an instruction to the shared agent
 `;
+
+/** Slash commands collagent answers locally; the rest belong to the agent. */
+export const ROOM_COMMANDS = new Set([
+  'help', 'participants', 'status', 'pause', 'resume', 'handoff', 'mode', 'end', 'quit', 'exit',
+]);
+
+/**
+ * Route one line of participant input: collagent's own room commands are
+ * handled locally, everything else — including the agent's slash commands —
+ * goes to the shared agent, from any participant's terminal, whatever the
+ * runtime. `//x` force-sends `/x` when collagent owns the same name.
+ */
+export function routeInput(text) {
+  if (text.startsWith('//')) return { type: 'instruction', text: text.slice(1) };
+  if (text.startsWith('/')) {
+    const [cmd, ...rest] = text.slice(1).split(/\s+/);
+    if (ROOM_COMMANDS.has(cmd)) return { type: 'room', cmd, rest };
+  }
+  return { type: 'instruction', text };
+}
 
 /** Interactive terminal loop shared by create and join. */
 export function startTui({ client, onQuit, agentLabel = 'agent' }) {
@@ -216,6 +243,13 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
     // you just typed is already on screen, so don't print it twice
     if (event.kind === 'instruction' && event.actor?.id === client.self?.participantId) return;
     println(renderEvent(event, { selfId: client.self?.participantId, agentLabel }));
+    // the server closes the room when its host is gone — leaving the prompt
+    // up would invite instructions that can queue nowhere
+    if (event.kind === 'room_closed') {
+      client.close();
+      rl.close();
+      onQuit?.();
+    }
   });
   client.on('session', () => {}); // presence shown on demand via /participants
   client.on('server-error', (message) => println(paint.red(`! ${message}`)));
@@ -229,8 +263,9 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
     const text = line.trim();
     if (!text) return rl.prompt();
 
-    if (text.startsWith('/')) {
-      const [cmd, ...rest] = text.slice(1).split(/\s+/);
+    const routed = routeInput(text);
+    if (routed.type === 'room') {
+      const { cmd, rest } = routed;
       switch (cmd) {
         case 'help': println(HELP); break;
         case 'participants':
@@ -253,13 +288,11 @@ export function startTui({ client, onQuit, agentLabel = 'agent' }) {
           rl.close();
           onQuit?.();
           return;
-        default:
-          println(paint.red(`unknown command /${cmd} — try /help`));
       }
       return rl.prompt();
     }
 
-    client.sendInstruction(text);
+    client.sendInstruction(routed.text);
     rl.prompt();
   });
 

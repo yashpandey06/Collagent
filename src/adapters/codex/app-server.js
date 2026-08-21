@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine } from '../instruction-format.js';
 import { encode, isServerRequest, isResponse, translateAppServerEvent } from './protocol.js';
 import { VERSION } from '../../version.js';
 
@@ -116,13 +117,13 @@ export class CodexAppServerAdapter extends AgentAdapter {
 
   async _startTurn({ text, from }) {
     if (!this.threadId) return { queued: false };
-    // Tag the speaker so the shared agent knows who is talking to it.
-    const speaker = from?.name ? `[${from.name}] ` : '';
+    // Speaker-tagged so the shared agent knows who is talking; slash
+    // commands pass through bare so the runtime can parse them.
     this.emit({ kind: 'agent_status', status: 'working' });
     try {
       const res = await this._request('turn/start', {
         threadId: this.threadId,
-        input: [{ type: 'text', text: `${speaker}${text}` }],
+        input: [{ type: 'text', text: formatInstructionLine({ text, from }) }],
       });
       this.turnId = res?.turn?.id ?? null;
     } catch (err) {

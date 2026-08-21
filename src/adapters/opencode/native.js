@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { AgentAdapter } from '../adapter.js';
+import { formatInstructionLine, isSlashCommand } from '../instruction-format.js';
 
 /**
  * Multiplayer around the real interactive OpenCode TUI. OpenCode is
@@ -161,14 +162,14 @@ export class OpencodeNativeAdapter extends AgentAdapter {
   }
 
   async _inject({ text, from }) {
-    const speaker = from?.name ? `[${from.name}] ` : '';
-    const line = `${speaker}${text}`;
+    const line = formatInstructionLine({ text, from });
     this._recentInjections.push({ text: line, ts: Date.now() });
     if (this._recentInjections.length > 20) this._recentInjections.shift();
     try {
       await this._post('/tui/append-prompt', { text: line });
       await this._post('/tui/submit-prompt', {});
-      this.emit({ kind: 'agent_status', status: 'working' });
+      // Slash commands drive the TUI's own UI, not a turn — no "working".
+      if (!isSlashCommand(text)) this.emit({ kind: 'agent_status', status: 'working' });
     } catch (err) {
       this.emit({ kind: 'error', message: `could not reach opencode's composer: ${err.message}` });
     }
