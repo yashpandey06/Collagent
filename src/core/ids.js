@@ -16,6 +16,19 @@ export function participantId() {
   return `p_${randomBytes(6).toString('hex')}`;
 }
 
+export function agentSessionId() {
+  return `as_${randomBytes(6).toString('hex')}`;
+}
+
+export function turnId() {
+  return `turn_${randomBytes(4).toString('hex')}`;
+}
+
+// Short shared secret for joining a room from another machine.
+export function joinKey() {
+  return randomBytes(5).toString('hex');
+}
+
 export function token() {
   return randomBytes(16).toString('hex');
 }

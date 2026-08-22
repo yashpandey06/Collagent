@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
+import { turnId } from '../core/ids.js';
 
 /**
  * Participant-side connection. Emits: created, welcome, event, session,
@@ -7,10 +8,11 @@ import WebSocket from 'ws';
  * credentials so a drop keeps identity and replays only missed events.
  */
 export class CollagentClient extends EventEmitter {
-  constructor({ serverUrl, name }) {
+  constructor({ serverUrl, name, userId = null }) {
     super();
     this.serverUrl = normalizeWsUrl(serverUrl);
     this.name = name;
+    this.userId = userId;
     this.ws = null;
     this.session = null;
     this.self = null;
@@ -41,6 +43,8 @@ export class CollagentClient extends EventEmitter {
         this.self = msg.self;
         if (msg.self?.name) this.name = msg.self.name; // server may dedupe the name
         this.agentToken = msg.agentToken;
+        this.joinKey = msg.joinKey ?? null;
+        this.agent = msg.agent ?? null;
         this._trackSeq(msg.events);
         this.emit('created', msg);
         break;
@@ -49,8 +53,16 @@ export class CollagentClient extends EventEmitter {
         this.self = msg.self;
         if (msg.self?.name) this.name = msg.self.name;
         if (msg.agentToken) this.agentToken = msg.agentToken; // host of a reopened room
+        if (msg.agents) this.agentGrants = msg.agents; // detached sessions this client may re-host
+        if (msg.joinKey) this.joinKey = msg.joinKey; // hosts may invite others
         this._trackSeq(msg.events);
         this.emit(msg.resumed ? 'reconnected' : 'welcome', msg);
+        break;
+      case 'agent_added':
+        this.emit('agent_added', msg);
+        break;
+      case 'ok':
+        this.emit('ok', msg.message);
         break;
       case 'event':
         if (msg.event?.seq) this.lastSeq = Math.max(this.lastSeq, msg.event.seq);
@@ -103,17 +115,23 @@ export class CollagentClient extends EventEmitter {
   }
 
   createSession({ agentType = 'unknown' } = {}) {
-    this._send({ type: 'create_session', name: this.name, agentType });
+    this._send({ type: 'create_session', name: this.name, agentType, userId: this.userId });
     return this._await('created');
   }
 
-  join(code) {
-    this._send({ type: 'join', code, name: this.name });
+  join(code, { key = null } = {}) {
+    this._send({ type: 'join', code, name: this.name, key, userId: this.userId });
     return this._await('welcome');
   }
 
-  sendInstruction(text) {
-    this._send({ type: 'instruction', text });
+  /** Add another agent session to the room; resolves with { agent, agentToken }. */
+  addAgent(agentType) {
+    this._send({ type: 'add_agent', agentType });
+    return this._await('agent_added');
+  }
+
+  sendInstruction(text, { to = null } = {}) {
+    this._send({ type: 'instruction', text, to });
   }
 
   control(action, extra = {}) {
@@ -153,8 +171,12 @@ export class CollagentClient extends EventEmitter {
 }
 
 /**
- * Bridges an AgentAdapter to a session over its own WebSocket, on the machine
- * that owns the agent: server messages → adapter, adapter events → server.
+ * Bridges an AgentAdapter to one AgentSession over its own WebSocket, on the
+ * machine that owns the agent: server messages → adapter, adapter events →
+ * server. The host also owns the turn lifecycle — a turn starts when an
+ * instruction (or a host-typed prompt) reaches the adapter and ends with the
+ * adapter's `result` contract event — so every event the server stores can
+ * carry an explicit turnId, never one inferred from timing.
  */
 export class AgentHost {
   constructor({ serverUrl, code, agentToken, adapter }) {
@@ -162,7 +184,9 @@ export class AgentHost {
     this.code = code;
     this.agentToken = agentToken;
     this.adapter = adapter;
+    this.agentId = null; // assigned by the server on attach
     this.ws = null;
+    this._turn = null;
   }
 
   async start() {
@@ -175,7 +199,10 @@ export class AgentHost {
       ws.once('error', reject);
       ws.on('message', async (raw) => {
         const msg = JSON.parse(raw.toString());
-        if (msg.type === 'agent_attached') return resolve();
+        if (msg.type === 'agent_attached') {
+          this.agentId = msg.agent?.agentId ?? null;
+          return resolve();
+        }
         if (msg.type === 'error') return reject(new Error(msg.message));
         try {
           await this._route(msg);
@@ -185,13 +212,14 @@ export class AgentHost {
       });
     });
 
-    this.adapter.attach((event) => this._emit(event));
+    this.adapter.attach((event) => this._onAdapterEvent(event));
     await this.adapter.createSession();
   }
 
   async _route(msg) {
     switch (msg.type) {
       case 'instruction':
+        this._beginTurn('instruction', msg.eventSeq);
         return this.adapter.sendInstruction({ text: msg.text, from: msg.from });
       case 'pause':
         return this.adapter.pause();
@@ -208,9 +236,46 @@ export class AgentHost {
     }
   }
 
+  _onAdapterEvent(event) {
+    if (event.kind === 'local_prompt') this._beginTurn('local_prompt');
+    if (event.kind === 'tool_use' && this._turn) this._turn.toolCalls++;
+    this._emit(event);
+    if (event.kind === 'result') this._endTurn(event);
+    if (event.kind === 'agent_status' && ['exited', 'error'].includes(event.status) && this._turn) {
+      this._endTurn({ ok: false });
+    }
+  }
+
+  _beginTurn(trigger, instructionSeq = null) {
+    if (this._turn) return this._turn;
+    this._turn = { id: turnId(), startedAt: Date.now(), toolCalls: 0 };
+    this._emit({
+      kind: 'turn_started',
+      turnId: this._turn.id,
+      trigger,
+      ...(instructionSeq ? { instructionSeq } : {}),
+    });
+    return this._turn;
+  }
+
+  _endTurn(result) {
+    const turn = this._turn;
+    if (!turn) return;
+    this._turn = null;
+    const ok = result.ok !== false;
+    this._emit({
+      kind: ok ? 'turn_completed' : 'turn_failed',
+      turnId: turn.id,
+      ok,
+      durationMs: result.durationMs ?? Date.now() - turn.startedAt,
+      toolCalls: turn.toolCalls,
+      usage: result.usage ?? null,
+    });
+  }
+
   _emit(event) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'agent_event', event }));
+      this.ws.send(JSON.stringify({ type: 'agent_event', event, turnId: this._turn?.id ?? event.turnId ?? null }));
     }
   }
 

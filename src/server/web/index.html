@@ -86,9 +86,10 @@ $('text').onkeydown = (e) => e.key === 'Enter' && send();
 function join() {
   const code = $('code').value.trim().toUpperCase();
   const name = $('name').value.trim() || 'web-viewer';
+  const key = params.get('key');
   if (!code) return;
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', code, name }));
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', code, name, key }));
   ws.onmessage = (m) => handle(JSON.parse(m.data));
   ws.onclose = () => addLine('connection closed', 'err');
 }
@@ -141,10 +142,14 @@ const agentMark = () => (session && AGENT_MARKS[session.agentType]) || '';
 
 let roomTitle = null;
 
+const multiAgent = () => ((session && session.agents) || []).length > 1;
+
 function renderSession() {
   const online = session.participants.filter((p) => p.connected).length;
+  const agents = session.agents || [];
+  const agentCell = multiAgent() ? `${agents.length} agents` : agentLabel();
   $('sessioninfo').textContent =
-    `room ${session.code} · ${agentLabel()} · ${session.status}` +
+    `room ${session.code} · ${agentCell} · ${session.status}` +
     `${session.mode === 'driver' ? ' · driver mode' : ''} · ${online} ${online === 1 ? 'person' : 'people'} here` +
     (roomTitle ? ` · “${roomTitle}”` : '');
   const el = $('presence');
@@ -156,11 +161,20 @@ function renderSession() {
     span.textContent = p.name + (marks.length ? ` [${marks.join(',')}]` : '');
     el.appendChild(span);
   }
-  const agent = document.createElement('span');
-  agent.className = 'agent';
-  agent.innerHTML = agentMark(); // our own static markup, never user input
-  agent.appendChild(document.createTextNode(agentLabel()));
-  el.appendChild(agent);
+  if (multiAgent()) {
+    for (const a of agents) {
+      const span = document.createElement('span');
+      span.className = a.attached ? 'agent on' : 'agent off';
+      span.textContent = `${a.agentId} [${a.attached ? a.status : 'detached'}]`;
+      el.appendChild(span);
+    }
+  } else {
+    const agent = document.createElement('span');
+    agent.className = 'agent';
+    agent.innerHTML = agentMark(); // our own static markup, never user input
+    agent.appendChild(document.createTextNode(agentLabel()));
+    el.appendChild(agent);
+  }
 }
 
 function renderEvent(e) {
@@ -171,10 +185,16 @@ function renderEvent(e) {
       return;
     case 'instruction':
       if (!roomTitle) { roomTitle = String(d.text || '').slice(0, 60); renderSession(); }
-      return addLine(`${who} › ${d.text}`, 'user');
+      return addLine(`${who} ›${multiAgent() && e.agentId ? ' → ' + e.agentId : ''} ${d.text}`, 'user');
     case 'local_prompt': return addLine(`⌨ host terminal › ${d.text}`, 'user');
     case 'notice': return addLine(`🔔 ${d.message}`, 'tool');
-    case 'agent_message': return addLine(`⏺ ${d.text}`, 'agent-msg');
+    case 'agent_message': return addLine(`⏺ ${multiAgent() && e.agentId ? e.agentId + ' ' : ''}${d.text}`, 'agent-msg');
+    case 'agent_session_created': return e.actor && e.actor.type === 'system' ? undefined : addLine(`＋ ${e.agentId} added by ${who}`, 'ok');
+    case 'agent_session_attached': return addLine(`● ${e.agentId || 'agent'} attached`, 'ok');
+    case 'agent_session_detached': return addLine(`○ ${e.agentId || 'agent'} detached — room stays open`, 'dim');
+    case 'handoff_completed': return addLine(`⇄ ${who} handed off to ${(d.to && d.to.name) || '?'}`, 'user');
+    case 'room_archived': return addLine(`▣ room archived by ${who}`, 'dim');
+    case 'turn_started': case 'turn_completed': case 'turn_failed': return;
     case 'tool_use': return addLine(`  ⚙ ${d.tool} ${d.input || ''}`, 'tool');
     case 'tool_result': return addLine(`    └ ${d.summary || ''}`, 'dim');
     case 'result': return addLine(d.ok ? `✓ turn complete${d.durationMs ? ' in ' + (d.durationMs / 1000).toFixed(1) + 's' : ''}` : '✗ turn failed', d.ok ? 'ok' : 'err');

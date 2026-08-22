@@ -9,6 +9,8 @@
  * reaches an adapter.
  */
 
+import { sanitizeText, sanitizeName } from '../core/sanitize.js';
+
 // A command is "/" + one word of letters/digits/_/-/: — matches every
 // runtime's command grammar while leaving paths ("/src/app.js …") as prose.
 const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(\s|$)/;
@@ -18,8 +20,10 @@ export function isSlashCommand(text) {
 }
 
 export function formatInstructionLine({ text, from }) {
-  const raw = String(text ?? '');
+  // The server sanitizes at ingress; stripping again here keeps a crafted
+  // paste-terminator out of the PTY even if an adapter is fed directly.
+  const raw = sanitizeText(String(text ?? ''));
   if (isSlashCommand(raw)) return raw.trim();
-  const speaker = from?.name ? `[${from.name}] ` : '';
+  const speaker = from?.name ? `[${sanitizeName(from.name)}] ` : '';
   return `${speaker}${raw}`;
 }

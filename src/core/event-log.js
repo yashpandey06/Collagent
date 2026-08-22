@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** Append-only, seq-numbered event log; optionally mirrored to a JSONL file. */
+/**
+ * Append-only, seq-numbered event log; optionally mirrored to a JSONL file
+ * and to an extra sink (the indexed store) via onAppend.
+ */
 export class EventLog {
   constructor({ persistPath = null } = {}) {
     this.events = [];
     this.seq = 0;
     this.persistPath = persistPath;
+    this.onAppend = null;
     if (persistPath) {
       fs.mkdirSync(path.dirname(persistPath), { recursive: true });
     }
@@ -29,6 +33,7 @@ export class EventLog {
         /* ignore */
       }
     }
+    try { this.onAppend?.(entry); } catch { /* index sink is best-effort too */ }
     return entry;
   }
 

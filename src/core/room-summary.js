@@ -9,8 +9,10 @@ export function buildRoomSummary(events = []) {
   let lastInstruction = null;
   let ended = false;
   const everNames = new Map();
+  const agentIds = new Set();
 
   for (const e of events) {
+    if (e.agentId) agentIds.add(e.agentId);
     switch (e.kind) {
       case 'session_created':
         createdAt = e.ts;
@@ -36,6 +38,9 @@ export function buildRoomSummary(events = []) {
         if (detail?.sessionId) agentSessionId = detail.sessionId;
         break;
       }
+      case 'agent_session_created':
+        if (e.agentId) agentIds.add(e.agentId);
+        break;
       case 'session_ended':
         ended = true;
         break;
@@ -46,6 +51,7 @@ export function buildRoomSummary(events = []) {
 
   return {
     agentType,
+    agentIds: [...agentIds],
     createdAt: createdAt ?? events[0]?.ts ?? null,
     lastActivity: events.at(-1)?.ts ?? null,
     eventCount: events.length,
