@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
 import { formatInstructionLine } from '../instruction-format.js';
 import { usageRecord } from '../usage.js';
+import { capture } from '../capture.js';
 import { uuid } from '../../core/ids.js';
 
 /**
@@ -248,21 +249,12 @@ export function normalizeClaudeMessage(msg) {
   return events;
 }
 
-function summarizeInput(input) {
-  try {
-    const s = JSON.stringify(input);
-    return s.length > 400 ? s.slice(0, 400) + '…' : s;
-  } catch {
-    return String(input);
-  }
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const summarizeInput = (input) => capture(input);
 
 function summarizeToolResult(content) {
-  let text = '';
-  if (typeof content === 'string') text = content;
-  else if (Array.isArray(content)) {
-    text = content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join(' ');
-  } else text = JSON.stringify(content ?? '');
-  text = text.replace(/\s+/g, ' ').trim();
-  return text.length > 200 ? text.slice(0, 200) + '…' : text;
+  if (Array.isArray(content)) {
+    return capture(content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join(' '));
+  }
+  return capture(content ?? '');
 }

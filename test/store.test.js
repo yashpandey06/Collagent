@@ -14,7 +14,7 @@ function tmpDir(t) {
   return dir;
 }
 
-test('rooms, agent sessions and participants survive a manager restart', (t) => {
+test('rooms, agent sessions and participants survive a manager restart', async (t) => {
   const dataDir = tmpDir(t);
   const m1 = new SessionManager({ dataDir });
   const session = m1.create({ agentType: 'claude-native' });
@@ -27,7 +27,7 @@ test('rooms, agent sessions and participants survive a manager restart', (t) => 
   m1.close();
 
   const m2 = new SessionManager({ dataDir });
-  assert.equal(m2.restore(), 1);
+  assert.equal(await m2.restore(), 1);
   const restored = m2.get(session.code);
   assert.ok(restored);
   assert.equal(restored.lifecycle, 'active');
@@ -46,7 +46,7 @@ test('rooms, agent sessions and participants survive a manager restart', (t) => 
   m2.close();
 });
 
-test('legacy JSONL rooms (no meta) migrate to an implicit AgentSession', (t) => {
+test('legacy JSONL rooms (no meta) migrate to an implicit AgentSession', async (t) => {
   const dataDir = tmpDir(t);
   const dir = path.join(dataDir, 'history');
   fs.mkdirSync(dir, { recursive: true });
@@ -60,7 +60,7 @@ test('legacy JSONL rooms (no meta) migrate to an implicit AgentSession', (t) => 
   fs.writeFileSync(path.join(dir, 'LGCY1.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
 
   const manager = new SessionManager({ dataDir });
-  assert.equal(manager.restore(), 1);
+  assert.equal(await manager.restore(), 1);
   const room = manager.get('LGCY1');
   assert.equal(room.agentType, 'claude-native');
   const agent = room.primaryAgent();

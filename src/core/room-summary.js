@@ -1,15 +1,19 @@
-/** Derive a room's descriptive summary (listings, status views) from its event history. */
-export function buildRoomSummary(events = []) {
-  let agentType;
-  let createdAt;
-  let cwd;
-  let agentSessionId = null;
-  let title = null;
-  let firstInstruction = null;
-  let lastInstruction = null;
-  let ended = false;
-  const everNames = new Map();
-  const agentIds = new Set();
+/**
+ * Derive a room's descriptive summary (listings, status views) from its event
+ * history. `seed` is a previously computed summary: capped in-memory logs fold
+ * their trimmed prefix into a seed so facts survive the trim.
+ */
+export function buildRoomSummary(events = [], seed = null) {
+  let agentType = seed?.agentType;
+  let createdAt = seed?.createdAt ?? undefined;
+  let cwd = seed?.cwd ?? undefined;
+  let agentSessionId = seed?.agentSessionId ?? null;
+  let title = seed?.title ?? null;
+  let firstInstruction = seed?.firstInstruction ?? null;
+  let lastInstruction = seed?.lastInstruction ?? null;
+  let ended = seed?.ended ?? false;
+  const everNames = new Map((seed?.participantsEver ?? []).map((n) => [n, 'seen']));
+  const agentIds = new Set(seed?.agentIds ?? []);
 
   for (const e of events) {
     if (e.agentId) agentIds.add(e.agentId);
@@ -53,13 +57,14 @@ export function buildRoomSummary(events = []) {
     agentType,
     agentIds: [...agentIds],
     createdAt: createdAt ?? events[0]?.ts ?? null,
-    lastActivity: events.at(-1)?.ts ?? null,
-    eventCount: events.length,
+    lastActivity: events.at(-1)?.ts ?? seed?.lastActivity ?? null,
+    eventCount: (seed?.eventCount ?? 0) + events.length,
     cwd: cwd ?? null,
     agentSessionId,
     // Agent-provided title when the runtime names the session; otherwise the
     // first instruction stands in so long room lists stay scannable.
     title: title ?? truncate(firstInstruction?.text, 60),
+    firstInstruction,
     lastInstruction,
     participantsEver: [...everNames.keys()],
     ended,

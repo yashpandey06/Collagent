@@ -7,6 +7,8 @@
  * private reasoning and never mirrored into a shared room.
  */
 
+import { capture } from '../capture.js';
+
 export const encode = (msg) => JSON.stringify({ jsonrpc: '2.0', ...msg }) + '\n';
 
 export const isRequest = (msg) => msg?.id !== undefined && msg?.method !== undefined;
@@ -79,12 +81,5 @@ export function turnEnd(stopReason, buffer = { text: '' }) {
   return events;
 }
 
-function compact(value, max = 400) {
-  const text = textOf(value);
-  let s = text;
-  if (!s) {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(textOf(value) || value);

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AgentAdapter } from '../adapter.js';
 import { formatInstructionLine } from '../instruction-format.js';
+import { capture } from '../capture.js';
 
 /**
  * Drives the Cursor CLI headless (`agent -p --output-format stream-json`).
@@ -203,12 +204,5 @@ export function normalizeCursorEvent(msg = {}) {
   }
 }
 
-function compact(value, max = 400) {
-  let s;
-  if (typeof value === 'string') s = value;
-  else {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(value);

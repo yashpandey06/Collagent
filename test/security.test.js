@@ -14,7 +14,7 @@ const ESC = String.fromCharCode(27);
 // trustLoopback: false makes the server treat every connection as remote,
 // so the tests exercise the rules that protect a network-exposed server.
 async function bootRemote(t, options = {}) {
-  const server = createCollagentServer({ dataDir: null, trustLoopback: false, ...options });
+  const server = createCollagentServer({ dataDir: null, trustLoopback: false, requireAuth: false, ...options });
   const addr = await server.listen(0, '127.0.0.1');
   t.after(() => server.close());
   return { server, addr, serverUrl: `ws://127.0.0.1:${addr.port}`, base: `http://127.0.0.1:${addr.port}` };

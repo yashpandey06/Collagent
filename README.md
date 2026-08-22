@@ -84,7 +84,7 @@ $ collagent join 7FK2P --name Bob --server ws://<alice-ip>:7717 --key <key from 
 
 Both terminals now show the same live feed: who joined, every instruction, Claude Code's messages, each tool call and result, and turn completions. Either participant can send instructions; the agent sees who is speaking (`[Bob] Add OAuth callback validation.`). The agent's slash commands work from Bob's terminal too — `/model` or `/permissions` typed by any participant runs in the shared agent's UI just as if the host had typed it (see [In-session commands](#in-session-commands)).
 
-A minimal web page for joining/viewing (no dashboard) is served at `http://<server>:7717/?code=7FK2P`.
+The server also ships a web control plane: the **dashboard** at `http://<server>:7717/` (live rooms table, per-room activity timeline with an activity/audit split, agent & presence panels, room creation, controls through the real participant protocol, and analytics folded from real events — runs, durations, tokens/cost where reported), developer **docs** at `/docs`, and the lightweight **room viewer** for invite links at `/?code=7FK2P`. The dashboard observes through a WebSocket *watcher* role — it consumes the same canonical event/session frames as the CLI, never fake state, and never appears as a participant unless you explicitly join.
 
 ### Commands
 
@@ -135,7 +135,7 @@ It works even when the server is down (reads stored history from disk), and outd
 
 ### Rooms are stored
 
-Every room's event history is persisted to `~/.collagent/history/<code>.jsonl` (and indexed into SQLite on Node ≥ 22.5) and **rooms survive server restarts** — the server restores rooms, agent sessions, participants and resume credentials on boot. `collagent open <code>` reopens a room and re-attaches its agent — in native mode it passes the runtime's own resume flag so the actual conversation continues where it left off. A room only disappears when the host ends it explicitly with `/end` or deletes it.
+Persistence is a repository layer with three backends: **PostgreSQL** (production source of truth, `DATABASE_URL`), **SQLite** (local default on Node ≥ 22.5), and plain JSON files (fallback). On the local backends every room also mirrors to `~/.collagent/history/<code>.jsonl`; on Postgres the database is authoritative and nothing depends on the client's filesystem. **Rooms survive server restarts** — rooms, agent sessions, participants, resume credentials, join keys, turns and every event restore on boot; in-memory history is capped (`COLLAGENT_EVENT_CACHE`) with older events served from the store. `collagent open <code>` reopens a room and re-attaches its agent — in native mode it passes the runtime's own resume flag so the actual conversation continues where it left off. A room only disappears when the host ends it explicitly with `/end` or deletes it.
 
 **A room is persistent work, not a temporary agent process.** Agents can detach (host closes their terminal, process dies) and the room stays open: remaining participants keep chatting, instructions queue and are delivered when an agent re-attaches, and a room with no connected host is adoptable — the next joiner becomes host and receives the re-attach grants. Joining or reconnecting shows a **“SINCE YOU WERE AWAY”** digest (derived from the event stream) plus the tail of the feed instead of replaying thousands of raw events.
 
@@ -183,7 +183,36 @@ A room starts with one agent and stays that way until someone with control says 
 
 Room lifecycle (`active | archived | ended`) and agent state (`connecting | starting | working | waiting | paused | idle | completed | failed | disconnected`) are separate; the room's wire `status` is derived. Every agent-originated event carries `roomId`, `agentId`, `agentSessionId` and an explicit `turnId` (turns are bracketed by `turn_started` / `turn_completed` events, never inferred from timing), and `turn_completed` carries normalized usage (tokens/cost where the runtime exposes them, `null` where it doesn't).
 
-**Security defaults:** the server binds `127.0.0.1` unless `--host` says otherwise; remote joins need the per-room join key; the HTTP admin API (list/delete) needs loopback or the token in `~/.collagent/admin-token`; join and HTTP requests are rate-limited per address; all remote text is stripped of terminal control bytes at the server edge (and again in the adapters) so ANSI/PTY escape injection dies before it reaches anyone's terminal.
+**Security defaults:** the server binds `127.0.0.1` unless `--host` says otherwise; remote clients register once (`POST /api/auth/register` → personal access token, stored hashed) and remote joins need the per-room join key, workspace membership, or a prior seat in the room; the HTTP admin API (list/delete) needs loopback or the token in `~/.collagent/admin-token`; join and HTTP requests are rate-limited per address; all remote text is stripped of terminal control bytes at the server edge (and again in the adapters) so ANSI/PTY escape injection dies before it reaches anyone's terminal.
+
+## Deployment
+
+Collagent deploys as a hosted backend, separate from the clients that connect to it:
+
+```text
+CLI / TUI · Web page            (clients — anywhere)
+        │ HTTPS / WSS
+        ▼
+Collagent backend               (one deployable service: auth/identity,
+  `collagent serve`              workspaces, rooms, agent sessions, realtime
+        │                        gateway, events/catch-up/usage APIs)
+        ▼
+PostgreSQL                      (source of truth: users, workspaces, rooms,
+                                 participants, agent sessions, events, turns)
+
+Agent hosts                     (separate processes, wherever the runtime
+  `collagent create/open/add`    lives: a developer's laptop for Claude Code/
+                                 Codex/Cursor…, a container for headless or
+                                 remote agents — they connect to the backend
+                                 as authenticated agent hosts over WSS)
+```
+
+- **`docker compose up`** starts the backend + Postgres with hosted-mode security (`.env.example` documents every variable). TLS terminates at your proxy (set `COLLAGENT_TRUST_PROXY=1`) or natively via `COLLAGENT_TLS_CERT`/`COLLAGENT_TLS_KEY`.
+- **Operations:** file-based SQL migrations run at boot (`migrations/`, tracked in `schema_migrations`); `/healthz` (liveness) and `/readyz` (checks the database); structured JSON logs (`COLLAGENT_LOG_FORMAT=json`); graceful shutdown on SIGTERM (clients notified, writes flushed, pool released); connection pooling; WebSocket heartbeats plus cursor-based (`sinceSeq`) reconnect/resume; CORS via `COLLAGENT_CORS_ORIGINS`.
+- **Clients:** the CLI registers automatically on first contact with a remote server and stores its token in `~/.collagent/credentials.json` (0600). The room lives on the backend — it stays alive when any human client, including the creator's laptop, disconnects; agents re-attach and resume where the runtime supports it.
+- **Local development:** `collagent dev` — one command, loopback, SQLite, no auth. `collagent dev --pg <url>` points it at a local Postgres. Production architecture and local simplicity are the same codepath with different switches.
+
+**HTTP API** (loopback, admin token, user token, or `?key=` per route): `POST /api/auth/register` · `GET /api/auth/whoami` · `GET /api/sessions` (scoped to the caller's workspaces/rooms) · `GET /api/sessions/:code` · `/agents` · `/events?since&limit&kind&agentId&turnId&participantId&afterTs` · `/catchup?since` · `/usage` · `DELETE /api/sessions/:code`.
 
 Three layers, deliberately separated:
 

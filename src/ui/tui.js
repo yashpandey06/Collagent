@@ -36,7 +36,8 @@ export function renderEvent(event, { selfId, agentLabel = 'agent', multiAgent = 
     case 'tool_use':
       return `${paint.yellow(`  ⚙ ${data.tool}`)} ${paint.dim(toolInputSummary(data.input))}`;
     case 'tool_result':
-      return paint.dim(`    └ ${data.isError ? paint.red('error: ') : ''}${truncate(data.summary ?? '', 140)}`);
+      // stored payloads are complete; the feed shows a one-line summary
+      return paint.dim(`    └ ${data.isError ? paint.red('error: ') : ''}${truncate(String(data.summary ?? '').replace(/\s+/g, ' '), 140)}`);
     case 'result': {
       const secs = data.durationMs ? ` in ${(data.durationMs / 1000).toFixed(1)}s` : '';
       const cost = data.costUsd ? ` ($${data.costUsd.toFixed(4)})` : '';

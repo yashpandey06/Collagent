@@ -8,11 +8,12 @@ import { turnId } from '../core/ids.js';
  * credentials so a drop keeps identity and replays only missed events.
  */
 export class CollagentClient extends EventEmitter {
-  constructor({ serverUrl, name, userId = null }) {
+  constructor({ serverUrl, name, userId = null, auth = null }) {
     super();
     this.serverUrl = normalizeWsUrl(serverUrl);
     this.name = name;
     this.userId = userId;
+    this.auth = auth; // { token } — hosted servers require it; loopback does not
     this.ws = null;
     this.session = null;
     this.self = null;
@@ -114,13 +115,13 @@ export class CollagentClient extends EventEmitter {
     }
   }
 
-  createSession({ agentType = 'unknown' } = {}) {
-    this._send({ type: 'create_session', name: this.name, agentType, userId: this.userId });
+  createSession({ agentType = 'unknown', workspaceId = null } = {}) {
+    this._send({ type: 'create_session', name: this.name, agentType, userId: this.userId, workspaceId, auth: this.auth });
     return this._await('created');
   }
 
   join(code, { key = null } = {}) {
-    this._send({ type: 'join', code, name: this.name, key, userId: this.userId });
+    this._send({ type: 'join', code, name: this.name, key, userId: this.userId, auth: this.auth });
     return this._await('welcome');
   }
 

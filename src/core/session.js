@@ -18,6 +18,7 @@ export class Session {
   constructor({ code, agentType = 'unknown', persistPath = null }) {
     this.code = code;
     this.agentType = agentType; // primary adapter id — legacy field, kept for compat
+    this.workspaceId = null;
     this.createdAt = Date.now();
     this.lifecycle = 'active';
     this.paused = false;
@@ -29,6 +30,9 @@ export class Session {
     this.joinKey = joinKey();
     this.agentInfo = null; // primary agent's ready detail — legacy field
     this.pending = []; // instructions waiting for an agent to attach
+    this.eventCache = 0; // 0 = unbounded; applyEventCache() bounds it
+    this.eventReader = null;
+    this._summarySeed = null;
     this.log = new EventLog({ persistPath });
   }
 
@@ -171,7 +175,33 @@ export class Session {
 
   /** Append an event; ctx may carry agentId / agentSessionId / turnId. */
   append(kind, actor, data = {}, ctx = {}) {
-    return this.log.append({ kind, actor, data, roomId: this.code, ...ctx });
+    const entry = this.log.append({ kind, actor, data, roomId: this.code, ...ctx });
+    this._maybeTrim();
+    return entry;
+  }
+
+  /**
+   * Cap the in-memory log at `size`, folding trimmed events into the summary
+   * seed; `reader(sinceSeq, limit)` serves the trimmed prefix from the store.
+   */
+  applyEventCache(size, reader) {
+    this.eventCache = size;
+    this.eventReader = reader;
+    this._maybeTrim();
+  }
+
+  _maybeTrim() {
+    if (!this.eventCache || this.log.events.length <= this.eventCache) return;
+    const dropped = this.log.trimTo(this.eventCache);
+    this._summarySeed = buildRoomSummary(dropped, this._summarySeed);
+  }
+
+  /** Events after `seq`, reaching into the store when the log is trimmed. */
+  async eventsSince(seq = 0) {
+    const floor = this.log.floorSeq;
+    if (seq >= floor - 1 || !this.eventReader) return this.log.since(seq);
+    const older = (await this.eventReader(seq, Math.min(floor - 1 - seq, 10_000))) ?? [];
+    return [...older.filter((e) => e.seq < floor), ...this.log.since(seq)];
   }
 
   /** Agent-runtime session id (e.g. Claude Code's), from the event history. */
@@ -189,7 +219,7 @@ export class Session {
 
   /** Snapshot + history-derived room facts, for listings and status views. */
   summary() {
-    const { agentSessionId, ...facts } = buildRoomSummary(this.log.events);
+    const { agentSessionId, firstInstruction, ...facts } = buildRoomSummary(this.log.events, this._summarySeed);
     return { ...this.toJSON(), ...facts, code: this.code };
   }
 
@@ -198,6 +228,7 @@ export class Session {
     return {
       code: this.code,
       agentType: this.agentType,
+      workspaceId: this.workspaceId,
       createdAt: this.createdAt,
       lifecycle: this.lifecycle,
       mode: this.mode,
@@ -216,6 +247,7 @@ export class Session {
 
   applyMeta(meta = {}) {
     if (meta.createdAt) this.createdAt = meta.createdAt;
+    if (meta.workspaceId) this.workspaceId = meta.workspaceId;
     if (meta.lifecycle && meta.lifecycle !== 'ended') this.lifecycle = meta.lifecycle;
     if (meta.mode) this.mode = meta.mode;
     if (meta.joinKey) this.joinKey = meta.joinKey;
@@ -235,6 +267,7 @@ export class Session {
     return {
       code: this.code,
       agentType: this.agentType,
+      workspaceId: this.workspaceId,
       agentInfo: this.agentInfo,
       createdAt: this.createdAt,
       lifecycle: this.lifecycle,

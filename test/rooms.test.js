@@ -13,7 +13,7 @@ function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-rooms-'));
 }
 
-test('rooms persist to disk and restore across manager restarts', () => {
+test('rooms persist to disk and restore across manager restarts', async () => {
   const dataDir = tmpDataDir();
   const m1 = new SessionManager({ dataDir });
   const s1 = m1.create({ agentType: 'claude-native' });
@@ -25,7 +25,7 @@ test('rooms persist to disk and restore across manager restarts', () => {
   s1.append('mode_changed', { type: 'user', id: 'p1', name: 'Alice' }, { mode: 'driver' });
 
   const m2 = new SessionManager({ dataDir });
-  assert.equal(m2.restore(), 1);
+  assert.equal(await m2.restore(), 1);
   const restored = m2.get(s1.code);
   assert.ok(restored, 'room restored by code');
   assert.equal(restored.agentType, 'claude-native');
@@ -36,11 +36,11 @@ test('rooms persist to disk and restore across manager restarts', () => {
   assert.ok(restored.log.length >= 5, 'full history retained');
 
   const m3 = new SessionManager({ dataDir });
-  m3.restore();
+  await m3.restore();
   const again = m3.get(s1.code);
   again.append('session_ended', { type: 'user', id: 'p1', name: 'Alice' }, {});
   const m4 = new SessionManager({ dataDir });
-  assert.equal(m4.restore(), 0, 'ended rooms are not restored');
+  assert.equal(await m4.restore(), 0, 'ended rooms are not restored');
 });
 
 test('first joiner of a restored room becomes host and can re-attach an agent', async (t) => {

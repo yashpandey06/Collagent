@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { AgentAdapter } from '../adapter.js';
 import { formatInstructionLine, isSlashCommand } from '../instruction-format.js';
 import { token } from '../../core/ids.js';
+import { capture } from '../capture.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_BIN = path.join(__dirname, '..', '..', '..', 'bin', 'collagent-hook.js');
@@ -339,15 +340,8 @@ export function translateHookEvent(payload = {}) {
   }
 }
 
-function compact(value, max = 400) {
-  let s;
-  if (typeof value === 'string') s = value;
-  else {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(value);
 
 /**
  * Assistant prose + session title from a chunk of transcript JSONL. Text

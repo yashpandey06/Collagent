@@ -8,6 +8,7 @@
  */
 
 import { usageRecord } from '../usage.js';
+import { capture } from '../capture.js';
 
 /** Frame one outbound message. */
 export const encode = (msg) => JSON.stringify(msg) + '\n';
@@ -129,12 +130,5 @@ const failed = (item) =>
 const changedPaths = (item) =>
   Array.isArray(item.changes) ? item.changes.map((c) => c.path).filter(Boolean).join(', ') : '';
 
-function compact(value, max = 400) {
-  let s;
-  if (typeof value === 'string') s = value;
-  else {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(value);

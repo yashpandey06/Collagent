@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,8 @@ import { sanitizeText, sanitizeName } from '../core/sanitize.js';
 import { catchupSummary, currentActivity } from '../core/catchup.js';
 import { buildRoomSummary } from '../core/room-summary.js';
 import { token } from '../core/ids.js';
+import { registerUser, resolveUser, personalWorkspaceId } from './auth.js';
+import { buildOverview, buildAnalytics } from './analytics.js';
 import { VERSION } from '../version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,28 +36,55 @@ const PENDING_LIMIT = 100;
  * needs loopback or the admin token; join and HTTP requests are rate-limited
  * per remote address; all remote text is stripped of terminal control bytes.
  */
+const envBool = (v) => (v === '1' || v === 'true' ? true : v === '0' || v === 'false' ? false : undefined);
+
 export function createCollagentServer({
   dataDir,
+  databaseUrl,
   log = () => {},
-  requireJoinKey = 'auto',
+  requireJoinKey = envBool(process.env.COLLAGENT_REQUIRE_JOIN_KEY) ?? 'auto',
+  requireAuth = envBool(process.env.COLLAGENT_REQUIRE_AUTH) ?? 'auto',
   joinRateLimit = 30,
   httpRateLimit = 240,
   trustLoopback = true, // tests set false to exercise the remote-caller rules
+  trustProxy = envBool(process.env.COLLAGENT_TRUST_PROXY) ?? false,
+  corsOrigins = (process.env.COLLAGENT_CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  tls = null, // { cert, key } PEM strings — or terminate TLS at a proxy
+  eventCache,
 } = {}) {
-  const manager = new SessionManager({ dataDir });
-  const restored = manager.restore();
-  if (restored) log(`restored ${restored} room(s) from history`);
+  const manager = new SessionManager({ dataDir, databaseUrl, ...(eventCache ? { eventCache } : {}) });
+  let restorePromise = null;
+  const ensureRestored = () => {
+    restorePromise ??= manager.restore().then((restored) => {
+      if (restored) log(`restored ${restored} room(s)`, { backend: manager.store.backend, restored });
+    });
+    return restorePromise;
+  };
   const adminToken = loadAdminToken(dataDir);
   const participantConns = new Map(); // code -> Set<ws>
   const agentConns = new Map(); // code -> Map<agentId, ws>
+  const roomWatchers = new Map(); // code -> Set<ws> — dashboard observers, never participants
+  const listWatchers = new Set(); // ws watching the rooms list (ws._scope: null = all, Set = allowed codes)
   const rates = new Map(); // `${bucket}:${ip}` -> { count, resetAt }
 
-  const httpServer = http.createServer((req, res) => handleHttp(req, res));
+  const httpServer = tls
+    ? https.createServer({ cert: tls.cert, key: tls.key }, (req, res) => handleHttp(req, res))
+    : http.createServer((req, res) => handleHttp(req, res));
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  // listen() rejects on bind errors; without this the re-emit on wss would crash
+  wss.on('error', (err) => log('ws server error', { error: err.message }));
+
+  // Behind a TLS-terminating proxy the socket peer is the proxy itself;
+  // trustProxy switches identity to the forwarded client address.
+  const remoteOf = (req) => (trustProxy
+    ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress
+    : req.socket.remoteAddress) ?? '';
 
   wss.on('connection', (ws, req) => {
     ws._ctx = { role: null, code: null, participantId: null, agentId: null };
-    ws._remote = req.socket.remoteAddress ?? '';
+    ws._remote = remoteOf(req);
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let msg;
       try {
@@ -62,15 +92,29 @@ export function createCollagentServer({
       } catch {
         return send(ws, { type: 'error', message: 'invalid JSON' });
       }
-      try {
-        handleMessage(ws, msg);
-      } catch (err) {
-        log('handler error', err);
-        send(ws, { type: 'error', message: err.message });
-      }
+      Promise.resolve()
+        .then(() => handleMessage(ws, msg))
+        .catch((err) => {
+          log('handler error', { error: err.message });
+          send(ws, { type: 'error', message: err.message });
+        });
     });
     ws.on('close', () => handleClose(ws));
   });
+
+  // Reconnect-safe realtime: dead peers (no pong) are terminated so their
+  // clients notice and resume from their event cursor.
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) {
+        ws.terminate();
+        continue;
+      }
+      ws.isAlive = false;
+      try { ws.ping(); } catch { /* closing */ }
+    }
+  }, 30_000);
+  heartbeat.unref?.();
 
   // ---- rate limiting & auth ------------------------------------------------
 
@@ -90,9 +134,39 @@ export function createCollagentServer({
   }
 
   function httpAuthorized(req) {
-    if (isLoopback(req.socket.remoteAddress)) return true;
+    if (isLoopback(remoteOf(req))) return true;
     const auth = req.headers.authorization ?? '';
     return Boolean(adminToken) && auth === `Bearer ${adminToken}`;
+  }
+
+  const bearerOf = (req) => (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '') || null;
+
+  function applyCors(req, res) {
+    const origin = req.headers.origin;
+    if (!origin || !corsOrigins.length) return false;
+    if (!corsOrigins.includes('*') && !corsOrigins.includes(origin)) return false;
+    res.setHeader('access-control-allow-origin', corsOrigins.includes('*') ? '*' : origin);
+    res.setHeader('access-control-allow-methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('access-control-allow-headers', 'authorization, content-type');
+    res.setHeader('access-control-max-age', '600');
+    return true;
+  }
+
+  function readJsonBody(req, maxBytes = 4096) {
+    return new Promise((resolve) => {
+      let body = '';
+      req.on('data', (d) => {
+        body += d;
+        if (body.length > maxBytes) {
+          resolve(null);
+          req.destroy();
+        }
+      });
+      req.on('end', () => {
+        try { resolve(JSON.parse(body || '{}')); } catch { resolve(null); }
+      });
+      req.on('error', () => resolve(null));
+    });
   }
 
   function roomReadAuthorized(req, url, session) {
@@ -107,27 +181,92 @@ export function createCollagentServer({
 
   // ---- http ------------------------------------------------------------------
 
-  function handleHttp(req, res) {
+  async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const json = (status, body) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (overLimit('http', req.socket.remoteAddress ?? '', httpRateLimit)) {
+    applyCors(req, res);
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      return res.end();
+    }
+    if (overLimit('http', remoteOf(req), httpRateLimit)) {
       return json(429, { error: 'rate limited' });
     }
 
     if (url.pathname === '/healthz') {
       return json(200, { ok: true, service: 'collagent', version: VERSION });
     }
+    if (url.pathname === '/readyz') {
+      try {
+        await ensureRestored();
+        await manager.store.ping?.();
+        return json(200, { ok: true, backend: manager.store.backend });
+      } catch (err) {
+        return json(503, { ok: false, error: err.message });
+      }
+    }
+
+    if (url.pathname === '/api/auth/register' && req.method === 'POST') {
+      if (overLimit('join', remoteOf(req), joinRateLimit)) return json(429, { error: 'rate limited' });
+      const body = await readJsonBody(req);
+      if (!body || typeof body.name !== 'string' || !body.name.trim()) {
+        return json(400, { error: 'a display name is required' });
+      }
+      await ensureRestored();
+      const account = await registerUser(manager.store, { name: body.name });
+      log(`user registered`, { userId: account.userId, name: account.name });
+      return json(201, account);
+    }
+    if (url.pathname === '/api/auth/whoami') {
+      const user = await resolveUser(manager.store, bearerOf(req));
+      return user ? json(200, user) : json(401, { error: 'invalid token' });
+    }
+
+    // Reads below share one visibility rule: loopback/admin see everything,
+    // a user token sees their workspaces' rooms and rooms they sat in.
+    async function visibleSessions() {
+      if (httpAuthorized(req)) return manager.list();
+      const user = await resolveUser(manager.store, bearerOf(req));
+      if (!user) return null;
+      const codes = await userScope(user);
+      return manager.list().filter((s) => codes.has(s.code));
+    }
 
     if (url.pathname === '/api/sessions') {
-      if (!httpAuthorized(req)) return json(403, { error: 'forbidden' });
-      const rooms = manager.list()
-        .filter((s) => s.lifecycle !== 'archived' || url.searchParams.get('archived') === '1')
+      const sessions = await visibleSessions();
+      if (!sessions) return json(403, { error: 'forbidden' });
+      const includeArchived = url.searchParams.get('archived') === '1';
+      const rooms = sessions
+        .filter((s) => s.lifecycle !== 'archived' || includeArchived)
         .map((s) => s.summary())
         .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
       return json(200, rooms);
+    }
+
+    if (url.pathname === '/api/overview') {
+      const sessions = await visibleSessions();
+      if (!sessions) return json(403, { error: 'forbidden' });
+      return json(200, buildOverview(sessions));
+    }
+
+    if (url.pathname === '/api/analytics') {
+      const sessions = await visibleSessions();
+      if (!sessions) return json(403, { error: 'forbidden' });
+      const sinceHours = Number(url.searchParams.get('sinceHours') ?? 24 * 7);
+      return json(200, await buildAnalytics(sessions, {
+        sinceTs: sinceHours > 0 ? Date.now() - sinceHours * 3_600_000 : 0,
+        room: url.searchParams.get('room')?.toUpperCase() || null,
+        runtime: url.searchParams.get('runtime') || null,
+        readTurns: async (code) => {
+          const completed = await manager.store.readEvents(code, { kind: 'turn_completed', limit: 1000 });
+          if (completed === null) return null;
+          const failed = (await manager.store.readEvents(code, { kind: 'turn_failed', limit: 1000 })) ?? [];
+          return [...completed, ...failed];
+        },
+      }));
     }
 
     const apiMatch = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9]+)(\/[a-z]+)?$/);
@@ -149,9 +288,19 @@ export function createCollagentServer({
         case '/agents':
           return json(200, [...session.agentSessions.values()].map((a) => a.toJSON()));
         case '/events': {
-          const since = Number(url.searchParams.get('since') ?? 0);
-          const limit = Math.min(Number(url.searchParams.get('limit') ?? 200), 500);
-          const events = manager.store.readEvents(session.code, { since, limit })
+          const q = url.searchParams;
+          const since = Number(q.get('since') ?? 0);
+          const limit = Math.min(Number(q.get('limit') ?? 200), 500);
+          const filters = {
+            since,
+            limit,
+            kind: q.get('kind') ?? undefined,
+            agentId: q.get('agentId') ?? undefined,
+            turnId: q.get('turnId') ?? undefined,
+            participantId: q.get('participantId') ?? undefined,
+            afterTs: q.get('afterTs') ? Number(q.get('afterTs')) : undefined,
+          };
+          const events = (await manager.store.readEvents(session.code, filters))
             ?? session.log.since(since).slice(0, limit);
           return json(200, events);
         }
@@ -159,30 +308,64 @@ export function createCollagentServer({
           const since = Number(url.searchParams.get('since') ?? 0);
           const snapshot = session.toJSON();
           return json(200, {
-            lines: catchupSummary(session.log.since(since)),
+            lines: catchupSummary(await session.eventsSince(since)),
             activity: currentActivity(snapshot),
             session: snapshot,
           });
         }
         case '/usage':
-          return json(200, aggregateUsage(session));
+          return json(200, await aggregateUsage(session));
         default:
           return json(404, { error: 'not found' });
       }
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      try {
-        const html = fs.readFileSync(path.join(__dirname, 'web', 'index.html'));
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        return res.end(html);
-      } catch {
-        res.writeHead(500);
-        return res.end('web ui missing');
-      }
+      // invite links (/?code=A7K2) keep opening the lightweight room viewer;
+      // the bare origin is the control dashboard
+      return servePage(res, url.searchParams.get('code') ? 'room.html' : 'dashboard.html');
+    }
+    if (url.pathname === '/room') return servePage(res, 'room.html');
+    // The docs are a separate static site (docs-site/dist, deployable on its
+    // own); serving it here is a convenience for local use.
+    if (url.pathname === '/docs' || url.pathname.startsWith('/docs/')) {
+      return serveDocs(res, url.pathname);
     }
     res.writeHead(404);
     res.end('not found');
+  }
+
+  function servePage(res, name) {
+    try {
+      let html = fs.readFileSync(path.join(__dirname, 'web', name), 'utf8');
+      // The dashboard links to the docs deployment; configurable, never hardcoded.
+      html = html.replaceAll('__COLLAGENT_DOCS_URL__', process.env.COLLAGENT_DOCS_URL || '/docs/');
+      // no-cache: browsers heuristically cache pages without this, leaving
+      // people staring at a stale dashboard after upgrades
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-cache',
+      });
+      res.end(html);
+    } catch {
+      res.writeHead(500);
+      res.end('web ui missing');
+    }
+  }
+
+  const DOCS_DIST = path.join(__dirname, '..', '..', 'docs-site', 'dist');
+  const DOC_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
+
+  function serveDocs(res, pathname) {
+    const rel = pathname.replace(/^\/docs\/?/, '') || 'index.html';
+    const file = path.resolve(DOCS_DIST, rel);
+    const type = DOC_TYPES[path.extname(file)];
+    if (!file.startsWith(DOCS_DIST + path.sep) || !type || !fs.existsSync(file)) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      return res.end(fs.existsSync(DOCS_DIST) ? 'not found' : 'docs not built — run: npm run docs:build');
+    }
+    res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-cache' });
+    res.end(fs.readFileSync(file));
   }
 
   function handleMessage(ws, msg) {
@@ -195,21 +378,141 @@ export function createCollagentServer({
       case 'agent_event': return onAgentEvent(ws, msg);
       case 'instruction': return onInstruction(ws, msg);
       case 'control': return onControl(ws, msg);
+      case 'watch': return onWatch(ws, msg);
+      case 'watch_room': return onWatchRoom(ws, msg);
+      case 'unwatch_room': return onUnwatchRoom(ws, msg);
       case 'leave': return onLeave(ws);
       default:
         return send(ws, { type: 'error', message: `unknown message type: ${msg.type}` });
     }
   }
 
+  // ---- dashboard observers -------------------------------------------------
+  // Watchers consume the same canonical event/session frames as participants
+  // but never appear in the room. Visibility follows the HTTP read rules:
+  // loopback and the admin token see everything; a user token sees their
+  // workspaces' rooms and rooms they sat in; a join key opens one room.
+
+  // Rooms a user may see: their workspaces' rooms + rooms they sat in.
+  // Computed from the live sessions, so a room created seconds ago counts.
+  async function userScope(user) {
+    const workspaces = new Set((await manager.store.listWorkspacesFor(user.id)).map((w) => w.id));
+    return new Set(manager.list()
+      .filter((s) => (s.workspaceId && workspaces.has(s.workspaceId))
+        || [...s.participants.values()].some((p) => p.userId === user.id))
+      .map((s) => s.code));
+  }
+
+  async function watchScope(ws, msg) {
+    if (isLoopback(ws._remote) || (msg.auth?.admin && msg.auth.admin === adminToken)) return null;
+    const user = await authenticate(ws, msg);
+    if (!user) return false;
+    return await userScope(user);
+  }
+
+  async function onWatch(ws, msg) {
+    const scope = await watchScope(ws, msg);
+    if (scope === false) return send(ws, { type: 'error', message: AUTH_HINT });
+    ws._scope = scope;
+    listWatchers.add(ws);
+    if (!ws._ctx.role) ws._ctx.role = 'watcher';
+    send(ws, { type: 'rooms', rooms: visibleRooms(ws) });
+  }
+
+  function visibleRooms(ws) {
+    return manager.list()
+      .filter((s) => !ws._scope || ws._scope.has(s.code))
+      .map((s) => s.summary())
+      .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+  }
+
+  async function onWatchRoom(ws, msg) {
+    const { code, key = null, sinceSeq = 0 } = msg;
+    const session = manager.get(code);
+    if (!session) return send(ws, { type: 'error', message: `no session with code ${code}` });
+
+    let allowed = isLoopback(ws._remote)
+      || (msg.auth?.admin && msg.auth.admin === adminToken)
+      || key === session.joinKey;
+    if (!allowed) {
+      const user = await authenticate(ws, msg);
+      allowed = Boolean(user) && (
+        [...session.participants.values()].some((p) => p.userId === user.id)
+        || (session.workspaceId && await manager.store.isMember(session.workspaceId, user.id))
+      );
+    }
+    if (!allowed) return send(ws, { type: 'error', message: 'not authorized to watch this room' });
+
+    if (!roomWatchers.has(session.code)) roomWatchers.set(session.code, new Set());
+    roomWatchers.get(session.code).add(ws);
+    (ws._watching ??= new Set()).add(session.code);
+    if (!ws._ctx.role) ws._ctx.role = 'watcher';
+    send(ws, {
+      type: 'room_snapshot',
+      session: session.toJSON(),
+      events: await session.eventsSince(sinceSeq),
+    });
+  }
+
+  function onUnwatchRoom(ws, { code }) {
+    const c = String(code ?? '').toUpperCase();
+    roomWatchers.get(c)?.delete(ws);
+    ws._watching?.delete(c);
+  }
+
+  function notifyWatchers(session) {
+    if (!listWatchers.size) return;
+    const summary = session.summary();
+    for (const ws of listWatchers) {
+      if (ws._scope && !ws._scope.has(session.code)) continue;
+      send(ws, { type: 'room_update', room: summary });
+    }
+  }
+
+  function notifyRoomRemoved(code) {
+    for (const ws of listWatchers) {
+      if (ws._scope && !ws._scope.has(code)) continue;
+      send(ws, { type: 'room_removed', code });
+    }
+    for (const ws of roomWatchers.get(code) ?? []) {
+      send(ws, { type: 'room_removed', code });
+    }
+    roomWatchers.delete(code);
+  }
+
   // ---- participant lifecycle -------------------------------------------
 
-  function onCreateSession(ws, { name = 'host', agentType = 'unknown', userId = null }) {
+  // Hosted mode requires a registered user; loopback development does not.
+  const authRequired = (ws) => requireAuth === true || (requireAuth === 'auto' && !isLoopback(ws._remote));
+
+  async function authenticate(ws, msg) {
+    if (ws._user) return ws._user;
+    const user = await resolveUser(manager.store, msg.auth?.token);
+    if (user) ws._user = user;
+    return user;
+  }
+
+  const AUTH_HINT = 'authentication required — register once: POST /api/auth/register {"name":"you"} and pass the token';
+
+  async function onCreateSession(ws, msg) {
+    const { name = 'host', agentType = 'unknown', userId = null, workspaceId = null } = msg;
     if (overLimit('join', ws._remote, joinRateLimit)) {
       return send(ws, { type: 'error', message: 'rate limited — try again shortly' });
     }
+    const user = await authenticate(ws, msg);
+    if (authRequired(ws) && !user) {
+      return send(ws, { type: 'error', message: AUTH_HINT });
+    }
     const session = manager.create({ agentType }); // appends session_created
+    if (user) {
+      const personal = personalWorkspaceId(user.id);
+      await manager.store.ensureWorkspace({ id: personal, name: `${user.name}'s workspace`, ownerId: user.id });
+      session.workspaceId = workspaceId && (await manager.store.isMember(workspaceId, user.id))
+        ? workspaceId
+        : personal;
+    }
     const agent = session.addAgentSession({ adapterType: agentType });
-    const p = session.addParticipant({ name: sanitizeName(name) || 'host', role: 'host', userId });
+    const p = session.addParticipant({ name: sanitizeName(name) || 'host', role: 'host', userId: user?.id ?? userId });
     agent.hostId = p.id;
     registerParticipant(ws, session, p);
     session.append('agent_session_created', sysActor(), { runtime: agent.runtime, adapterType: agentType },
@@ -230,14 +533,26 @@ export function createCollagentServer({
     log(`session ${session.code} created by ${p.name}`);
   }
 
-  function onJoin(ws, { code, name = 'guest', key = null, userId = null }) {
+  async function onJoin(ws, msg) {
+    const { code, name = 'guest', key = null, userId = null } = msg;
     if (overLimit('join', ws._remote, joinRateLimit)) {
       return send(ws, { type: 'error', message: 'rate limited — try again shortly' });
     }
     const session = manager.get(code);
     if (!session) return send(ws, { type: 'error', message: `no session with code ${code}` });
     if (session.lifecycle === 'ended') return send(ws, { type: 'error', message: 'session has ended' });
-    if (!joinKeyOk(ws, session, key)) {
+
+    const user = await authenticate(ws, msg);
+    if (authRequired(ws) && !user) {
+      return send(ws, { type: 'error', message: AUTH_HINT });
+    }
+    // Authorization: the join key, workspace membership, or having sat in
+    // this room before — any one admits.
+    const wasHere = user && [...session.participants.values()].some((x) => x.userId === user.id);
+    const isMember = user && session.workspaceId
+      ? await manager.store.isMember(session.workspaceId, user.id)
+      : false;
+    if (!joinKeyOk(ws, session, key) && !wasHere && !isMember) {
       return send(ws, { type: 'error', message: 'this room needs a join key — ask the host for the invite (collagent join CODE --key …)' });
     }
     if (session.lifecycle === 'archived') session.lifecycle = 'active';
@@ -245,7 +560,7 @@ export function createCollagentServer({
     // A room with no connected host is adoptable: the first joiner takes over
     // and may re-attach its agents.
     const role = session.hasConnectedHost() ? 'collaborator' : 'host';
-    const p = session.addParticipant({ name: sanitizeName(name) || 'guest', role, userId });
+    const p = session.addParticipant({ name: sanitizeName(name) || 'guest', role, userId: user?.id ?? userId });
     registerParticipant(ws, session, p);
     broadcastEvent(session, session.append('participant_joined', userActor(p), { role: p.role }));
     manager.saveMeta(session);
@@ -254,7 +569,7 @@ export function createCollagentServer({
       type: 'welcome',
       session: session.toJSON(),
       self: selfPayload(p),
-      events: session.log.since(0),
+      events: await session.eventsSince(0),
       ...(p.role === 'host' ? { joinKey: session.joinKey } : {}),
       ...reattachGrant(session, p),
     });
@@ -262,7 +577,7 @@ export function createCollagentServer({
     log(`${p.name} joined session ${session.code}${role === 'host' ? ' (as host)' : ''}`);
   }
 
-  function onRejoin(ws, { code, participantId, resumeToken, sinceSeq = 0 }) {
+  async function onRejoin(ws, { code, participantId, resumeToken, sinceSeq = 0 }) {
     const session = manager.get(code);
     if (!session) return send(ws, { type: 'error', message: `no session with code ${code}` });
     const p = session.getParticipant(participantId);
@@ -276,7 +591,7 @@ export function createCollagentServer({
       type: 'welcome',
       session: session.toJSON(),
       self: selfPayload(p),
-      events: session.log.since(sinceSeq),
+      events: await session.eventsSince(sinceSeq),
       resumed: true,
       ...(p.role === 'host' ? { joinKey: session.joinKey } : {}),
       ...reattachGrant(session, p),
@@ -403,7 +718,18 @@ export function createCollagentServer({
       }
     }
     if (kind === 'turn_started') agent.currentTurnId = data.turnId ?? turnId;
-    if (kind === 'turn_completed' || kind === 'turn_failed') agent.currentTurnId = null;
+    if (kind === 'turn_completed' || kind === 'turn_failed') {
+      agent.currentTurnId = null;
+      manager.store.saveTurn(session.code, {
+        turnId: data.turnId ?? turnId,
+        agentSessionId: agent.id,
+        agentId: agent.agentId,
+        ok: data.ok,
+        durationMs: data.durationMs,
+        toolCalls: data.toolCalls,
+        usage: data.usage,
+      });
+    }
 
     broadcastEvent(session, session.append(kind, agentActor(agent), data, agentCtx(agent, turnId ?? data.turnId)));
     broadcastSession(session);
@@ -541,6 +867,7 @@ export function createCollagentServer({
         }
         manager.end(session.code);
         broadcastSession(session);
+        notifyRoomRemoved(session.code);
         for (const conn of participantConns.get(session.code) ?? []) conn.close();
         return;
       }
@@ -630,6 +957,7 @@ export function createCollagentServer({
       for (const conn of participantConns.get(session.code) ?? []) conn.close();
       for (const agentWs of (agentConns.get(session.code) ?? new Map()).values()) agentWs.close();
       manager.end(session.code);
+      notifyRoomRemoved(session.code);
       log(`room ${code} deleted`);
     }
     const removedFile = manager.deleteHistory(code);
@@ -651,9 +979,15 @@ export function createCollagentServer({
       .join(', ');
   }
 
-  function aggregateUsage(session) {
+  async function aggregateUsage(session) {
+    // Prefer the indexed store (complete history); fall back to the in-memory log.
+    const fromStore = await manager.store.readEvents(session.code, { kind: 'turn_completed', limit: 1000 });
+    const failed = fromStore !== null
+      ? (await manager.store.readEvents(session.code, { kind: 'turn_failed', limit: 1000 })) ?? []
+      : [];
+    const source = fromStore !== null ? [...fromStore, ...failed] : session.log.events;
     const byAgent = new Map();
-    for (const e of session.log.events) {
+    for (const e of source) {
       if (e.kind !== 'turn_completed' && e.kind !== 'turn_failed') continue;
       const key = e.agentId ?? 'agent';
       if (!byAgent.has(key)) {
@@ -702,6 +1036,8 @@ export function createCollagentServer({
   }
 
   function handleClose(ws) {
+    listWatchers.delete(ws);
+    for (const watched of ws._watching ?? []) roomWatchers.get(watched)?.delete(ws);
     const { role, code, participantId, agentId } = ws._ctx ?? {};
     if (!code) return;
     const session = manager.get(code);
@@ -731,12 +1067,27 @@ export function createCollagentServer({
     for (const conn of participantConns.get(session.code) ?? []) {
       if (conn.readyState === conn.OPEN) conn.send(payload);
     }
+    for (const conn of roomWatchers.get(session.code) ?? []) {
+      if (conn.readyState === conn.OPEN) conn.send(payload);
+    }
   }
+
+  const watcherDebounce = new Map(); // code -> timeout for rooms-list pushes
 
   function broadcastSession(session) {
     const payload = JSON.stringify({ type: 'session', session: session.toJSON() });
     for (const conn of participantConns.get(session.code) ?? []) {
       if (conn.readyState === conn.OPEN) conn.send(payload);
+    }
+    for (const conn of roomWatchers.get(session.code) ?? []) {
+      if (conn.readyState === conn.OPEN) conn.send(payload);
+    }
+    // The rooms list needs summaries (a heavier fold) — debounce those pushes.
+    if (listWatchers.size && !watcherDebounce.has(session.code)) {
+      watcherDebounce.set(session.code, setTimeout(() => {
+        watcherDebounce.delete(session.code);
+        if (manager.get(session.code)) notifyWatchers(session);
+      }, 250));
     }
   }
 
@@ -758,13 +1109,37 @@ export function createCollagentServer({
     httpServer,
     manager,
     adminToken,
-    listen(port, host = '127.0.0.1') {
-      return new Promise((resolve) => httpServer.listen(port, host, () => resolve(httpServer.address())));
+    async listen(port, host = '127.0.0.1') {
+      await ensureRestored();
+      return new Promise((resolve, reject) => {
+        httpServer.once('error', reject);
+        httpServer.listen(port, host, () => {
+          httpServer.off('error', reject);
+          resolve(httpServer.address());
+        });
+      });
     },
-    close() {
+    /** Graceful: notify clients, stop accepting, flush persistence. */
+    async shutdown() {
+      clearInterval(heartbeat);
+      for (const t of watcherDebounce.values()) clearTimeout(t);
+      watcherDebounce.clear();
+      for (const ws of wss.clients) {
+        try { ws.close(1001, 'server shutting down'); } catch { /* ignore */ }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
       for (const ws of wss.clients) ws.terminate();
-      manager.close();
-      return new Promise((resolve) => httpServer.close(resolve));
+      await new Promise((resolve) => httpServer.close(resolve));
+      await manager.close();
+    },
+    async close() {
+      clearInterval(heartbeat);
+      for (const t of watcherDebounce.values()) clearTimeout(t);
+      watcherDebounce.clear();
+      for (const ws of wss.clients) ws.terminate();
+      const closed = new Promise((resolve) => httpServer.close(resolve));
+      await manager.close();
+      return closed;
     },
   };
 }

@@ -41,7 +41,8 @@ function printHelp() {
     ['status <code>', "one room's state and participants"],
     ['delete [code]', 'delete rooms — bare delete opens a picker'],
     ['leave', 'leave the last room you joined'],
-    ['serve', 'run a session server for your team'],
+    ['serve', 'run a session server (hosted backend)'],
+    ['dev', 'local dev server with sensible defaults'],
   ].forEach(row);
   console.log('');
 
@@ -51,12 +52,14 @@ function printHelp() {
     ['--agent <id>', 'which coding agent (see: collagent agents)'],
     ['--name <name>', 'your display name in the room'],
     ['--server <url>', `session server (default ws://127.0.0.1:${DEFAULT_PORT})`],
+    ['--key <key>', 'join key for rooms on remote servers'],
     ['--headless', "collagent's feed UI instead of the agent's own"],
     ['--cwd <dir>', 'working directory for the agent'],
     ['--model <model>', 'model override'],
   ].forEach(row);
   console.log('');
-  console.log(paint.dim('  advanced: --adapter <type> · --permission-mode <m> (headless; default acceptEdits) · --port/--host for serve'));
+  console.log(paint.dim('  advanced: --adapter <type> · --permission-mode <m> (headless) · serve: --port/--host/--pg <url>'));
+  console.log(paint.dim('  env: DATABASE_URL · COLLAGENT_REQUIRE_AUTH · COLLAGENT_CORS_ORIGINS · COLLAGENT_TLS_CERT/KEY · COLLAGENT_LOG_FORMAT=json'));
   console.log('');
 }
 
@@ -66,6 +69,7 @@ export async function run(argv) {
 
   switch (command) {
     case 'serve': return cmdServe(opts);
+    case 'dev': return cmdDev(opts);
     case 'create': return cmdCreate(opts);
     case 'open': return cmdOpen(opts);
     case 'add': return cmdAdd(opts);
@@ -129,17 +133,75 @@ function identity() {
   return fresh;
 }
 
+// Remote servers require a registered user; first contact registers one and
+// stores the token per server origin (0600). Loopback servers skip auth.
+async function ensureAuth(serverUrl, name) {
+  if (isLocalHost(serverUrl)) return null;
+  const origin = httpUrl(serverUrl);
+  const file = path.join(defaultDataDir(), 'credentials.json');
+  let all = {};
+  try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first use */ }
+  if (all[origin]?.token) return all[origin];
+  try {
+    const res = await fetch(`${origin}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null; // server predates auth, or registration is closed
+    const account = await res.json();
+    all[origin] = { userId: account.userId, token: account.token, name: account.name };
+    fs.mkdirSync(defaultDataDir(), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(all), { mode: 0o600 });
+    console.log(paint.dim(`  registered on ${origin} as ${account.name}`));
+    return all[origin];
+  } catch {
+    return null;
+  }
+}
+
+async function connectClient(serverUrl, name) {
+  const auth = await ensureAuth(serverUrl, name);
+  const client = new CollagentClient({
+    serverUrl,
+    name,
+    userId: auth?.userId ?? identity().userId,
+    auth: auth ? { token: auth.token } : null,
+  });
+  await client.connect();
+  return client;
+}
+
 // ---- commands ------------------------------------------------------------
 
-async function cmdServe(opts) {
-  const port = Number(opts.port ?? DEFAULT_PORT);
+function makeLogger() {
+  if ((process.env.COLLAGENT_LOG_FORMAT ?? '').toLowerCase() === 'json') {
+    return (msg, fields = {}) =>
+      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', msg, ...fields }));
+  }
+  return (...a) => console.log(paint.dim('[server]'), ...a.map((x) => (typeof x === 'object' ? JSON.stringify(x) : x)));
+}
+
+function loadTls() {
+  const cert = process.env.COLLAGENT_TLS_CERT;
+  const key = process.env.COLLAGENT_TLS_KEY;
+  if (!cert || !key) return null;
+  return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
+}
+
+async function cmdServe(opts, { dev = false } = {}) {
+  const port = Number(opts.port ?? process.env.PORT ?? DEFAULT_PORT);
   // Loopback by default: exposing the server is an explicit choice.
-  const host = opts.host ?? '127.0.0.1';
+  const host = opts.host ?? process.env.HOST ?? '127.0.0.1';
+  const tls = loadTls();
   const server = createCollagentServer({
     dataDir: defaultDataDir(),
-    log: (...a) => console.log(paint.dim('[server]'), ...a),
+    ...(opts.pg ? { databaseUrl: opts.pg } : {}),
+    tls,
+    log: makeLogger(),
   });
-  const addr = await server.listen(port, host);
+  const addr = await listenTakingOver(server, port, host);
   try {
     fs.mkdirSync(defaultDataDir(), { recursive: true });
     fs.writeFileSync(
@@ -147,12 +209,57 @@ async function cmdServe(opts) {
       JSON.stringify({ pid: process.pid, port: addr.port, version: VERSION }),
     );
   } catch { /* non-fatal */ }
-  console.log(`collagent server v${VERSION} listening on http://${host}:${addr.port}  (ws path: /ws)`);
-  console.log(paint.dim(`rooms & history: ${path.join(defaultDataDir(), 'history')}`));
+
+  const scheme = tls ? 'https' : 'http';
+  const backend = server.manager.store.backend;
+  console.log(`collagent server v${VERSION} listening on ${scheme}://${host}:${addr.port}  (ws path: /ws)`);
+  console.log(paint.dim(`dashboard: ${scheme}://${host === '0.0.0.0' ? 'localhost' : host}:${addr.port}/ · docs: /docs`));
+  console.log(paint.dim(`store: ${backend}${backend === 'postgres' ? '' : ` · rooms & history: ${path.join(defaultDataDir(), 'history')}`}`));
   if (host === '127.0.0.1') {
-    console.log(paint.dim('local only — for a team server run: collagent serve --host 0.0.0.0 (joins then need each room\'s key)'));
+    console.log(paint.dim('local only — for a team server run: collagent serve --host 0.0.0.0 (joins then need auth + each room\'s key)'));
   } else {
-    console.log(paint.yellow(`reachable from the network — joins need each room's key; admin API needs ${path.join(defaultDataDir(), 'admin-token')}`));
+    console.log(paint.yellow(`reachable from the network — remote clients register once (POST /api/auth/register) and joins need each room's key; admin API needs ${path.join(defaultDataDir(), 'admin-token')}`));
+  }
+  if (dev) {
+    console.log('');
+    console.log(paint.dim('  dev mode — try it:'));
+    console.log(paint.dim('    collagent create            # terminal 2'));
+    console.log(paint.dim(`    open ${scheme}://localhost:${addr.port}/   # web viewer`));
+  }
+
+  // Graceful shutdown: finish in-flight writes, tell clients, release the DB.
+  const stop = async (signal) => {
+    console.log(paint.dim(`\n${signal} — shutting down gracefully…`));
+    await server.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGINT', () => stop('SIGINT'));
+}
+
+/** `collagent dev` — local services with sensible defaults, one command. */
+async function cmdDev(opts) {
+  printLogo('dev server');
+  return cmdServe(opts, { dev: true });
+}
+
+// A stale collagent daemon (often auto-started by `create`) may hold the
+// port; `serve`/`dev` mean "I am the server now", so stop it and take over.
+async function listenTakingOver(server, port, host) {
+  try {
+    return await server.listen(port, host);
+  } catch (err) {
+    if (err.code !== 'EADDRINUSE') throw err;
+    const url = `ws://127.0.0.1:${port}`;
+    const health = await serverHealth(url);
+    if (!health) {
+      throw new Error(`port ${port} is in use by something that isn't collagent — pick another: collagent dev --port ${port + 1}`);
+    }
+    console.log(paint.dim(`a collagent server (v${health.version}) already holds port ${port} — taking over…`));
+    if (!(await stopLocalServer(url))) {
+      throw new Error(`could not stop it — kill it manually: lsof -ti tcp:${port} | xargs kill`);
+    }
+    return server.listen(port, host);
   }
 }
 
@@ -172,8 +279,7 @@ async function cmdCreate(opts) {
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
 
-  const client = new CollagentClient({ serverUrl, name, userId: identity().userId });
-  await client.connect();
+  const client = await connectClient(serverUrl, name);
   const created = await client.createSession({ agentType: adapterType });
   const code = created.session.code;
   saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey });
@@ -199,8 +305,7 @@ async function cmdOpen(opts) {
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
 
-  const client = new CollagentClient({ serverUrl, name, userId: identity().userId });
-  await client.connect();
+  const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
   const welcome = await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
   saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey ?? stored?.key });
@@ -261,8 +366,7 @@ async function cmdAdd(opts) {
 
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
-  const client = new CollagentClient({ serverUrl, name, userId: identity().userId });
-  await client.connect();
+  const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
   await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
   saveRoomState(code, {
@@ -597,8 +701,7 @@ async function cmdJoin(opts) {
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
 
-  const client = new CollagentClient({ serverUrl, name, userId: identity().userId });
-  await client.connect();
+  const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
   const key = opts.key ?? stored?.key ?? null;
   const welcome = await rejoinOrJoin(client, code, { stored, key });
@@ -950,17 +1053,23 @@ async function ensureServer(serverUrl) {
 
 async function stopLocalServer(serverUrl) {
   const wantPort = Number(new URL(serverUrl.replace(/^ws/, 'http')).port || DEFAULT_PORT);
+  // server.json names the last server started on ANY port — trust it only
+  // when it matches; otherwise (or when its pid is gone) kill the port owner.
+  let killed = false;
   try {
     const info = JSON.parse(fs.readFileSync(path.join(defaultDataDir(), 'server.json'), 'utf8'));
-    if (info.port === wantPort && info.pid) process.kill(info.pid, 'SIGTERM');
-  } catch {
-    // pre-0.1.x servers wrote no server.json; fall back to the port owner
+    if (info.port === wantPort && info.pid) {
+      process.kill(info.pid, 'SIGTERM');
+      killed = true;
+    }
+  } catch { /* no file, unreadable, or the pid is already gone */ }
+  if (!killed) {
     try {
       const { execSync } = await import('node:child_process');
       execSync(`lsof -ti tcp:${wantPort} -sTCP:LISTEN | xargs kill`, { stdio: 'ignore' });
-    } catch { /* handled below */ }
+    } catch { /* verified below via health */ }
   }
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 30; i++) {
     if (!(await serverHealth(serverUrl))) return true;
     await new Promise((r) => setTimeout(r, 100));
   }

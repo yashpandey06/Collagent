@@ -34,6 +34,9 @@ if ls node_modules/node-pty/prebuilds/*/spawn-helper >/dev/null 2>&1; then
   xattr -d com.apple.quarantine node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 fi
 
+echo "▸ building the docs site"
+node docs-site/build.mjs
+
 echo "▸ linking the collagent command (npm link)"
 if npm link >/dev/null 2>&1; then
   echo "  ✓ 'collagent' is now on your PATH"
