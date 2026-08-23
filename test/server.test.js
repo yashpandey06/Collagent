@@ -153,8 +153,10 @@ test('driver mode + handoff controls who can instruct', async (t) => {
   assert.match(await deniedPause, /permission/);
 
   alice.control('handoff', { target: 'Bob' });
-  const handoff = await waitForEvent(bob, (e) => e.kind === 'control_transferred');
+  const handoff = await waitForEvent(bob, (e) => e.kind === 'handoff_completed');
   assert.equal(handoff.data.to.name, 'Bob');
+  assert.equal(handoff.data.to.type, 'human');
+  assert.ok(handoff.data.context, 'handoff persists structured context');
 
   bob.sendInstruction('bob with control');
   const result = await waitForEvent(bob, (e) => e.kind === 'result');

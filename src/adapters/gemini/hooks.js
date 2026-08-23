@@ -1,3 +1,4 @@
+import { capture } from '../capture.js';
 /** Lifecycle hooks Collagent registers to observe an interactive Gemini session. */
 export const HOOK_EVENTS = [
   'SessionStart',
@@ -78,12 +79,5 @@ export function translateGeminiHookEvent(payload = {}) {
   }
 }
 
-function compact(value, max = 400) {
-  let s;
-  if (typeof value === 'string') s = value;
-  else {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(value);

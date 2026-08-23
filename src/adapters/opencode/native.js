@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { AgentAdapter } from '../adapter.js';
 import { formatInstructionLine, isSlashCommand } from '../instruction-format.js';
+import { capture } from '../capture.js';
 
 /**
  * Multiplayer around the real interactive OpenCode TUI. OpenCode is
@@ -351,12 +352,5 @@ function freePort() {
   });
 }
 
-function compact(value, max = 400) {
-  let s;
-  if (typeof value === 'string') s = value;
-  else {
-    try { s = JSON.stringify(value); } catch { s = String(value); }
-  }
-  s = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
+// Stored payloads stay complete (up to the safety cap); renderers truncate.
+const compact = (value) => capture(value);

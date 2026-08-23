@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Collagent</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg stroke='%23ff875f' stroke-width='1.8'%3E%3Cpath d='M12 13 5.5 5M12 13l6.5-8M12 13v8'/%3E%3C/g%3E%3Ccircle cx='5.5' cy='5' r='2.4' fill='%23e6e6ea'/%3E%3Ccircle cx='18.5' cy='5' r='2.4' fill='%23e6e6ea'/%3E%3Ccircle cx='12' cy='21' r='2.4' fill='%23e6e6ea'/%3E%3Ccircle cx='12' cy='13' r='3' fill='%23ff875f'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#101014; --panel:#16161c; --panel2:#1a1a21; --hover:#1e1e26;
+    --ink:#e6e6ea; --dim:#9a9aa5; --faint:#55555f; --line:#26262e;
+    --accent:#ff875f; --accent-ink:#1a120d; --accent-soft:#2b1d16;
+    --ok:#5ad48a; --warn:#e0c368; --err:#ff7a7a; --human:#7cc7ff; --agent:#d6c7ff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg:#faf8f5; --panel:#ffffff; --panel2:#f1eee8; --hover:#f5f2ec;
+    --ink:#211f1c; --dim:#6d6a62; --faint:#a29d92; --line:#e6e1d7;
+    --accent:#d4551f; --accent-ink:#ffffff; --accent-soft:#f8e4d9;
+    --ok:#1e7c47; --warn:#946a0a; --err:#c03535; --human:#1465b0; --agent:#6a4fd0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:13.5px/1.55 var(--mono);
+    display:grid; grid-template-columns: 196px 1fr; min-height:100vh;
+    transition: background .25s, color .25s;
+  }
+
+  /* ---- sidebar ---- */
+  aside { border-right:1px solid var(--line); padding:18px 14px;
+          display:flex; flex-direction:column; gap:4px; position:sticky; top:0; height:100vh; }
+  .brand { display:flex; align-items:center; gap:9px; padding:2px 8px 16px; }
+  .brand svg { width:18px; height:18px; }
+  .brand b { letter-spacing:.04em; }
+  nav a { display:block; color:var(--dim); text-decoration:none; padding:7px 10px;
+          border-radius:6px; border-left:2px solid transparent;
+          transition: color .15s, background .15s, border-color .15s; }
+  nav a:hover { color:var(--ink); background:var(--panel); }
+  nav a.active { color:var(--ink); background:var(--panel); border-left-color:var(--accent); }
+  .side-foot { margin-top:auto; display:flex; flex-direction:column; gap:8px; padding:0 8px; }
+  #conn { font-size:12px; cursor:pointer; transition: color .3s; background:none; border:0;
+          font-family:var(--mono); text-align:left; padding:0; }
+  #conn.ok { color:var(--ok); } #conn.warn { color:var(--warn); } #conn.err { color:var(--err); }
+  #themeBtn { font-family:var(--mono); font-size:11.5px; color:var(--faint); background:none;
+              border:0; cursor:pointer; padding:0; text-align:left; }
+  #themeBtn:hover { color:var(--dim); }
+
+  /* ---- main ---- */
+  main { padding:26px 32px 60px; min-width:0; }
+  h1 { font-size:15px; letter-spacing:.06em; margin:0 0 4px; font-weight:600; }
+  .sub { color:var(--dim); font-size:12.5px; margin:0 0 22px; }
+  section { display:none; animation: viewin .18s ease; }
+  section.on { display:block; }
+  @keyframes viewin { from { opacity:0; transform:translateY(3px); } to { opacity:1; } }
+
+  .label { font-size:10.5px; letter-spacing:.12em; color:var(--faint); text-transform:uppercase; margin:0 0 8px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; }
+  .grow { flex:1; min-width:220px; }
+
+  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:14px; margin-bottom:22px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:13px 16px; }
+  .stat b { display:block; font-size:26px; font-weight:600; font-variant-numeric:tabular-nums; transition:color .3s; }
+  .stat span { color:var(--faint); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; }
+  .stat b.bump { color:var(--accent); }
+
+  table { border-collapse:collapse; width:100%; }
+  th { text-align:left; color:var(--faint); font-weight:400; font-size:10.5px; letter-spacing:.1em;
+       text-transform:uppercase; padding:6px 12px; border-bottom:1px solid var(--line); }
+  td { padding:9px 12px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:0; }
+  tbody tr { cursor:pointer; transition: background .12s; }
+  tbody tr:hover, tbody tr:focus-visible { background:var(--hover); outline:none; }
+  .code-chip { background:var(--accent); color:var(--accent-ink); font-weight:700; border-radius:4px;
+               padding:1px 7px; letter-spacing:.05em; }
+  .code-chip.dim { background:var(--line); color:var(--dim); }
+
+  .dot-ok { color:var(--ok); } .dot-idle { color:var(--faint); }
+  .dot-warn { color:var(--warn); } .dot-err { color:var(--err); }
+  .pulse { animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:.35;} }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation:none; } section, dialog[open] { animation:none; } }
+
+  button.act { font-family:var(--mono); font-size:12.5px; color:var(--ink);
+               background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+               padding:6px 12px; cursor:pointer; transition:border-color .15s, background .15s; }
+  button.act:hover:not(:disabled) { border-color:var(--accent); }
+  button.act.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:600; }
+  button.act.primary:hover:not(:disabled) { filter:brightness(1.08); }
+  button.act:disabled { opacity:.38; cursor:default; }
+  input.field, select.field { font-family:var(--mono); font-size:13px; color:var(--ink);
+    background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:7px 10px; }
+  input.field:focus-visible, select.field:focus-visible, button:focus-visible, a:focus-visible, tr:focus-visible {
+    outline:1.5px solid var(--accent); outline-offset:1px; }
+
+  /* agent icon */
+  .aicon { width:15px; height:15px; vertical-align:-2.5px; display:inline-block; }
+
+  /* timeline */
+  .timeline { max-height:58vh; overflow-y:auto; padding-right:4px; }
+  .tl { display:grid; grid-template-columns:44px 1fr; gap:10px; padding:3.5px 0; align-items:baseline; animation:tlin .22s ease; }
+  @keyframes tlin { from { opacity:0; transform:translateX(-4px);} to { opacity:1; } }
+  .tl time { color:var(--faint); font-size:11.5px; }
+  .tl .txt { color:var(--dim); overflow-wrap:anywhere; }
+  .tl .who { color:var(--dim); font-weight:600; }
+  .tl.human .who { color:var(--human); }
+  .tl.agent .who { color:var(--agent); }
+  .tl.handoff .who, .tl.handoff .txt { color:var(--accent); }
+  .tl.error .who, .tl.error .txt { color:var(--err); }
+  .tl.system .who { color:var(--faint); }
+  .tl q { color:var(--ink); quotes:'“' '”'; }
+  .roomtag { color:var(--faint); }
+
+  .tabs { display:flex; gap:2px; }
+  .tabs button { font-family:var(--mono); font-size:11.5px; letter-spacing:.08em; text-transform:uppercase;
+    background:none; border:0; color:var(--faint); padding:4px 10px; cursor:pointer;
+    border-bottom:2px solid transparent; transition: color .15s, border-color .15s; }
+  .tabs button.on { color:var(--ink); border-bottom-color:var(--accent); }
+
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chips button { font-family:var(--mono); font-size:11px; color:var(--dim); background:var(--panel2);
+    border:1px solid var(--line); border-radius:99px; padding:2.5px 10px; cursor:pointer;
+    transition: color .15s, border-color .15s, background .15s; }
+  .chips button.on { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
+
+  .cell { display:flex; justify-content:space-between; align-items:baseline; padding:5.5px 0;
+          border-bottom:1px solid var(--line); gap:10px; transition: opacity .3s; }
+  .cell:last-child { border-bottom:0; }
+  .cell small { color:var(--faint); font-size:11px; }
+  .cell .x { color:var(--faint); background:none; border:0; cursor:pointer; font-family:var(--mono); font-size:11px; padding:0; }
+  .cell .x:hover { color:var(--err); }
+
+  .bar { display:grid; grid-template-columns:100px 1fr 78px; gap:10px; align-items:center; padding:4px 0; }
+  .bar .track { height:9px; background:var(--panel2); border-radius:3px; overflow:hidden; }
+  .bar .fill { height:100%; background:var(--accent); border-radius:3px; width:0; transition:width .5s ease; }
+  .bar em { font-style:normal; color:var(--dim); text-align:right; font-variant-numeric:tabular-nums; font-size:12px; }
+
+  .spark { display:flex; align-items:flex-end; gap:2px; height:44px; }
+  .spark i { flex:1; background:var(--accent-soft); border-radius:2px 2px 0 0; min-height:2px; transition:height .4s ease; }
+  .spark i.hot { background:var(--accent); }
+
+  .catchup { border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:0 8px 8px 0;
+             background:var(--panel2); padding:10px 14px; margin-bottom:12px; animation:viewin .25s ease; }
+  .catchup .label { margin-bottom:6px; }
+  .catchup div { color:var(--ok); font-size:12.5px; padding:1px 0; }
+  .catchup .now { color:var(--warn); }
+  .youarehere { color:var(--faint); text-align:center; font-size:11px; letter-spacing:.15em; padding:6px 0; }
+
+  .empty { color:var(--faint); text-align:center; padding:26px 10px; font-size:12.5px; }
+  .empty b { display:block; color:var(--dim); margin-bottom:4px; font-size:13px; }
+  .skeleton { height:12px; border-radius:4px; background:var(--panel2); margin:9px 0; animation:pulse 1.4s ease-in-out infinite; }
+
+  dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:10px;
+           padding:22px 24px; min-width:380px; max-width:440px; font-family:var(--mono);
+           animation: dlgin .16s ease; }
+  @keyframes dlgin { from { opacity:0; transform:scale(.97);} to { opacity:1; } }
+  dialog::backdrop { background:rgba(6,6,9,.6); backdrop-filter:blur(1.5px); }
+  .runtime-pick { display:grid; gap:6px; margin:12px 0 16px; }
+  .runtime-pick label { display:flex; gap:10px; align-items:center; padding:8px 10px;
+    border:1px solid var(--line); border-radius:6px; cursor:pointer; transition:border-color .15s, background .15s; }
+  .runtime-pick label:hover { border-color:var(--accent); }
+  .runtime-pick label:has(input:checked) { border-color:var(--accent); background:var(--accent-soft); }
+  .runtime-pick input { accent-color:var(--accent); }
+  .invite-box { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+                padding:9px 12px; margin:8px 0; user-select:all; overflow-wrap:anywhere; font-size:12.5px; }
+  .dlg-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  .muted { color:var(--dim); } .faint { color:var(--faint); }
+  .mb { margin-bottom:16px; } .mt { margin-top:16px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><g stroke="#ff875f" stroke-width="1.8"><path d="M12 13 5.5 5M12 13l6.5-8M12 13v8"/></g><circle cx="5.5" cy="5" r="2.4" fill="currentColor"/><circle cx="18.5" cy="5" r="2.4" fill="currentColor"/><circle cx="12" cy="21" r="2.4" fill="currentColor"/><circle cx="12" cy="13" r="3" fill="#ff875f"/></svg>
+    <b>collagent</b>
+  </div>
+  <nav>
+    <a href="#/overview" data-nav="overview">Overview</a>
+    <a href="#/rooms" data-nav="rooms">Rooms</a>
+    <a href="#/analytics" data-nav="analytics">Analytics</a>
+    <a href="__COLLAGENT_DOCS_URL__" target="_blank" rel="noopener">Docs ↗</a>
+  </nav>
+  <div class="side-foot">
+    <button id="conn" class="warn" title="connection · click for settings">◌ connecting…</button>
+    <button id="themeBtn">◐ theme</button>
+  </div>
+</aside>
+
+<main>
+  <!-- ============ OVERVIEW ============ -->
+  <section id="view-overview">
+    <h1>OVERVIEW</h1>
+    <p class="sub">What is happening across your rooms and agents, right now.</p>
+    <div class="stats">
+      <div class="stat"><b id="st-rooms">–</b><span>live rooms</span></div>
+      <div class="stat"><b id="st-agents">–</b><span>agents attached</span></div>
+      <div class="stat"><b id="st-people">–</b><span>people online</span></div>
+      <div class="stat"><b id="st-working">–</b><span>working now</span></div>
+    </div>
+    <div class="row">
+      <div class="panel grow" style="flex:2">
+        <p class="label">Recent activity</p>
+        <div id="ov-recent" class="timeline" style="max-height:44vh">
+          <div class="skeleton" style="width:70%"></div><div class="skeleton" style="width:50%"></div><div class="skeleton" style="width:62%"></div>
+        </div>
+      </div>
+      <div class="grow">
+        <div class="panel mb">
+          <p class="label">Agents by runtime</p>
+          <div id="ov-runtimes"><div class="skeleton" style="width:80%"></div><div class="skeleton" style="width:55%"></div></div>
+        </div>
+        <div class="panel">
+          <p class="label">Usage · all time</p>
+          <div id="ov-usage"><div class="skeleton" style="width:65%"></div><div class="skeleton" style="width:70%"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ROOMS ============ -->
+  <section id="view-rooms">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:10px">
+      <div><h1>ROOMS</h1><p class="sub">Every room this server knows, live.</p></div>
+      <div style="display:flex; gap:8px">
+        <button class="act" id="joinRoomBtn">Join room</button>
+        <button class="act primary" id="newRoomBtn">＋ New room</button>
+      </div>
+    </div>
+    <div class="panel" style="padding:4px 2px">
+      <table id="roomsTable">
+        <thead><tr>
+          <th>code</th><th>topic</th><th>agents</th><th>people</th><th>in</th><th>status</th><th>last activity</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="roomsEmpty" class="empty" style="display:none">
+        <b>No rooms yet</b>
+        Create one here, or run <span class="muted">collagent create</span> in a terminal.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ROOM ============ -->
+  <section id="view-room">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px" class="mb">
+      <div style="display:flex; align-items:center; gap:12px">
+        <a href="#/rooms" class="faint" style="text-decoration:none" aria-label="back to rooms">←</a>
+        <span class="code-chip" id="r-code">·····</span>
+        <span id="r-status" class="muted"></span>
+        <span id="r-topic" class="faint"></span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center">
+        <button class="act" id="r-invite">copy invite</button>
+        <button class="act" id="r-join">join</button>
+        <button class="act" id="r-pause" disabled>pause</button>
+        <button class="act" id="r-archive" disabled>archive</button>
+        <button class="act" id="r-end" disabled>end</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="panel grow" style="flex:2.4; min-width:340px">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px" class="mb">
+          <div class="tabs">
+            <button data-tab="activity" class="on">Activity</button>
+            <button data-tab="audit">Audit</button>
+          </div>
+          <div class="chips" id="r-filters">
+            <button data-f="" class="on">All</button>
+            <button data-f="human">Humans</button>
+            <button data-f="agent">Agents</button>
+            <button data-f="system">System</button>
+            <button data-f="handoff">Controls</button>
+            <button data-f="error">Errors</button>
+          </div>
+          <select class="field" id="r-agentfilter" style="padding:3px 8px; font-size:11.5px">
+            <option value="">every agent</option>
+          </select>
+        </div>
+        <div id="r-catchup"></div>
+        <div id="r-timeline" class="timeline"></div>
+        <div id="r-instruct" class="mt" style="display:none">
+          <input class="field" id="r-input" style="width:100%" placeholder="instruct the agent — @agent-id to address one…">
+        </div>
+      </div>
+      <div class="grow" style="max-width:330px">
+        <div class="panel mb">
+          <p class="label">Agents</p>
+          <div id="r-agents"></div>
+          <p class="faint" style="font-size:11px; margin:10px 0 0">attach another from a terminal:<br><span class="muted" id="r-addcmd"></span></p>
+        </div>
+        <div class="panel mb">
+          <p class="label">People</p>
+          <div id="r-people"></div>
+        </div>
+        <div class="panel">
+          <p class="label">Session</p>
+          <div id="r-meta" class="faint" style="font-size:12px"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ANALYTICS ============ -->
+  <section id="view-analytics">
+    <h1>ANALYTICS</h1>
+    <p class="sub">Folded from real events and turns — blank means the runtime doesn't report it.</p>
+    <div class="row mb" style="align-items:center">
+      <span class="tabs" id="an-ranges">
+        <button data-h="24">24h</button>
+        <button data-h="168" class="on">7d</button>
+        <button data-h="720">30d</button>
+        <button data-h="0">all</button>
+      </span>
+      <select class="field" id="an-room"><option value="">all rooms</option></select>
+      <select class="field" id="an-runtime"><option value="">all runtimes</option></select>
+    </div>
+    <div class="row">
+      <div class="grow">
+        <div class="panel mb">
+          <p class="label">Agent activity · runs</p>
+          <div id="an-bars"></div>
+        </div>
+        <div class="panel">
+          <p class="label">Activity · events per hour <span id="an-sparkmeta" style="text-transform:none; letter-spacing:0"></span></p>
+          <div id="an-spark" class="spark"></div>
+        </div>
+      </div>
+      <div class="grow">
+        <div class="panel mb">
+          <p class="label">Usage</p>
+          <div id="an-usage"></div>
+        </div>
+        <div class="panel">
+          <p class="label">Coordination</p>
+          <div id="an-coord"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ CREATE ROOM ============ -->
+<dialog id="createDlg">
+  <p class="label">Create room</p>
+  <div id="create-step1">
+    <p class="muted" style="margin:4px 0 2px">Agent</p>
+    <div class="runtime-pick" id="runtimePick"></div>
+    <div class="dlg-actions">
+      <button class="act" id="createCancel">Cancel</button>
+      <button class="act primary" id="createGo">Create</button>
+    </div>
+  </div>
+  <div id="create-step2" style="display:none">
+    <p style="margin:6px 0"><span style="color:var(--ok)">✓ Room created</span>&nbsp; <span class="code-chip" id="created-code"></span></p>
+    <p class="muted" style="margin:12px 0 2px">Start the agent on the machine it should run on:</p>
+    <div class="invite-box" id="created-cmd"></div>
+    <div class="dlg-actions" style="justify-content:flex-start">
+      <button class="act" id="copyCodeBtn">Copy room code</button>
+      <button class="act" id="copyInviteBtn">Copy invite</button>
+      <button class="act primary" id="createDone">Open room</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- ============ JOIN ROOM ============ -->
+<dialog id="joinDlg">
+  <p class="label">Join a room</p>
+  <p class="muted" style="margin:6px 0 2px">Room code</p>
+  <input class="field" id="joinCode" style="width:100%; text-transform:uppercase" maxlength="8" placeholder="A7K2">
+  <p class="muted" style="margin:12px 0 2px">Join key <span class="faint">(only for rooms on remote servers)</span></p>
+  <input class="field" id="joinKey" style="width:100%" placeholder="optional">
+  <div class="dlg-actions">
+    <button class="act" id="joinCancel">Cancel</button>
+    <button class="act primary" id="joinGo">Join room</button>
+  </div>
+</dialog>
+
+<!-- ============ SETTINGS (connection pill) ============ -->
+<dialog id="settingsDlg">
+  <p class="label">Connection &amp; identity</p>
+  <p class="muted" style="font-size:12px">Local servers need no setup. For a remote server, register once
+  (<span class="faint">POST /api/auth/register</span>) and paste your token.</p>
+  <p class="muted" style="margin:12px 0 2px">Access token</p>
+  <input class="field" id="tokenInput" style="width:100%" placeholder="cgt_…">
+  <p class="muted" style="margin:12px 0 2px">Display name</p>
+  <input class="field" id="nameInput" style="width:100%" placeholder="dashboard">
+  <div class="dlg-actions">
+    <button class="act" id="settingsCancel">Cancel</button>
+    <button class="act primary" id="settingsSave">Save &amp; reconnect</button>
+  </div>
+</dialog>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+// ---- AgentIcon(runtime): one abstraction, used everywhere -------------------
+// Recognizable vendor logomarks as inline SVG; ink parts use currentColor so
+// both themes work. Fallback: a neutral node dot.
+const AGENT_MARKS = {
+  claude:   '<svg viewBox="0 0 24 24" fill="none" stroke="#D97757" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg>',
+  codex:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5z"/></svg>',
+  cursor:   '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 21 7v10l-9 5-9-5V7z" opacity=".22"/><path d="M12 2 21 7l-9 5-9-5z" opacity=".95"/><path d="M12 12v10l-9-5V7z" opacity=".55"/></svg>',
+  gemini:   '<svg viewBox="0 0 24 24" fill="#7C8CF8"><path d="M12 2c.6 5.5 4.5 9.4 10 10-5.5.6-9.4 4.5-10 10-.6-5.5-4.5-9.4-10-10 5.5-.6 9.4-4.5 10-10z"/></svg>',
+  opencode: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>',
+  goose:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 22 12 12 22 2 12z" opacity=".9"/><path d="M12 7 17 12 12 17 7 12z" fill="var(--bg)"/></svg>',
+  mock:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/></svg>',
+};
+function agentIcon(runtime, title) {
+  const span = el('span', 'aicon');
+  span.innerHTML = AGENT_MARKS[runtime] ?? '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5"/></svg>';
+  if (title) span.title = title;
+  span.setAttribute('role', 'img');
+  span.setAttribute('aria-label', runtime);
+  return span;
+}
+
+const RUNTIMES = [
+  { id: 'claude',   label: 'Claude Code' },
+  { id: 'codex',    label: 'Codex' },
+  { id: 'cursor',   label: 'Cursor' },
+  { id: 'gemini',   label: 'Gemini CLI' },
+  { id: 'opencode', label: 'OpenCode' },
+  { id: 'goose',    label: 'Goose' },
+];
+const ADAPTER_OF = { claude: 'claude-native', codex: 'codex-native', cursor: 'cursor-native', gemini: 'gemini-native', opencode: 'opencode-native', goose: 'goose-native' };
+
+// ---- theme -------------------------------------------------------------------
+let theme = null;
+try { theme = localStorage.getItem('collagent.theme'); } catch { /* private mode */ }
+if (theme === 'light') document.documentElement.dataset.theme = 'light';
+$('themeBtn').onclick = () => {
+  const light = document.documentElement.dataset.theme !== 'light';
+  document.documentElement.dataset.theme = light ? 'light' : '';
+  try { localStorage.setItem('collagent.theme', light ? 'light' : 'dark'); } catch { /* private */ }
+};
+
+// ---- identity ------------------------------------------------------------------
+let token = null;
+try { token = localStorage.getItem('collagent.token'); } catch { /* private mode */ }
+const auth = () => (token ? { token } : undefined);
+const headers = () => (token ? { authorization: 'Bearer ' + token } : {});
+function dashboardName() {
+  try { return localStorage.getItem('collagent.name') || 'dashboard'; } catch { return 'dashboard'; }
+}
+
+// ---- state -----------------------------------------------------------------------
+const rooms = new Map();
+const roomKeys = new Map(); // code -> join key entered via the Join dialog
+let currentRoom = null;
+let roomState = null;
+let roomEvents = [];
+let lastSeq = 0;
+let roomTab = 'activity';
+let roomFilter = '';
+let roomAgentFilter = '';
+let joined = null;
+
+// ---- watcher socket ---------------------------------------------------------------
+let ws = null;
+let retry = 0;
+
+function connect() {
+  setConn('warn', '◌ connecting…');
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => {
+    retry = 0;
+    setConn('ok', '● connected');
+    ws.send(JSON.stringify({ type: 'watch', auth: auth() }));
+    if (currentRoom) {
+      ws.send(JSON.stringify({ type: 'watch_room', code: currentRoom, sinceSeq: lastSeq, key: roomKeys.get(currentRoom), auth: auth() }));
+    }
+  };
+  ws.onmessage = (m) => handle(JSON.parse(m.data));
+  ws.onclose = () => {
+    const delay = Math.min(500 * 2 ** retry++, 8000);
+    setConn(retry > 3 ? 'err' : 'warn', retry > 3 ? '○ offline — retrying' : '◌ reconnecting…');
+    setTimeout(connect, delay);
+  };
+}
+
+function setConn(cls, text) {
+  const n = $('conn');
+  n.className = cls;
+  n.textContent = text;
+}
+
+function handle(msg) {
+  switch (msg.type) {
+    case 'rooms':
+      rooms.clear();
+      for (const r of msg.rooms) rooms.set(r.code, r);
+      renderRooms(); renderOverviewStats();
+      break;
+    case 'room_update':
+      rooms.set(msg.room.code, msg.room);
+      renderRooms(); renderOverviewStats();
+      break;
+    case 'room_removed':
+      rooms.delete(msg.code);
+      renderRooms(); renderOverviewStats();
+      if (currentRoom === msg.code) { roomState = null; renderRoomHeader(); }
+      break;
+    case 'room_snapshot':
+      if (msg.session.code !== currentRoom) return;
+      roomState = msg.session;
+      for (const e of msg.events) pushRoomEvent(e, false);
+      renderRoomAll();
+      break;
+    case 'event':
+      if (msg.event.roomId === currentRoom || !msg.event.roomId) {
+        pushRoomEvent(msg.event, true);
+        feedRecent(msg.event, currentRoom);
+      }
+      break;
+    case 'session':
+      if (msg.session.code === currentRoom) { roomState = msg.session; renderRoomSide(); renderRoomHeader(); }
+      break;
+    case 'error':
+      toastError(msg.message);
+      break;
+  }
+}
+
+function toastError(message) {
+  setConn('err', '! ' + message);
+  setTimeout(() => { if (ws?.readyState === 1) setConn('ok', '● connected'); }, 4000);
+}
+
+// ---- router -------------------------------------------------------------------------
+const views = ['overview', 'rooms', 'analytics', 'room'];
+function route() {
+  const hash = location.hash || '#/overview';
+  const roomMatch = hash.match(/^#\/room\/([A-Za-z0-9]+)/);
+  const view = roomMatch ? 'room' : (hash.replace('#/', '') || 'overview');
+  for (const v of views) $('view-' + v)?.classList.toggle('on', v === view);
+  document.querySelectorAll('[data-nav]').forEach((a) =>
+    a.classList.toggle('active', a.dataset.nav === view || (view === 'room' && a.dataset.nav === 'rooms')));
+  if (roomMatch) openRoom(roomMatch[1].toUpperCase());
+  else closeRoom();
+  if (view === 'overview') refreshOverview();
+  if (view === 'analytics') refreshAnalytics();
+}
+window.addEventListener('hashchange', route);
+
+// ---- overview -------------------------------------------------------------------------
+function renderOverviewStats() {
+  const list = [...rooms.values()];
+  const live = list.filter((r) => r.participants?.some((p) => p.connected) || r.agents?.some((a) => a.attached));
+  const attached = list.flatMap((r) => r.agents ?? []).filter((a) => a.attached);
+  bump('st-rooms', live.length);
+  bump('st-agents', attached.length);
+  bump('st-people', list.reduce((n, r) => n + (r.participants?.filter((p) => p.connected).length ?? 0), 0));
+  bump('st-working', attached.filter((a) => a.status === 'working').length);
+}
+
+function bump(id, value) {
+  const n = $(id);
+  if (n.textContent !== String(value)) {
+    n.textContent = value;
+    n.classList.add('bump');
+    setTimeout(() => n.classList.remove('bump'), 600);
+  }
+}
+
+async function refreshOverview() {
+  try {
+    const res = await fetch('/api/overview', { headers: headers() });
+    if (!res.ok) return;
+    const ov = await res.json();
+
+    const runtimes = $('ov-runtimes');
+    runtimes.replaceChildren();
+    const entries = Object.entries(ov.agents.byRuntime).sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...entries.map(([, n]) => n));
+    for (const [rt, n] of entries) runtimes.appendChild(barRow(rt, n, max, String(n)));
+    if (!entries.length) {
+      runtimes.appendChild(emptyState('No agents yet', 'Rooms with agents will show their runtimes here.'));
+    }
+
+    const usage = $('ov-usage');
+    usage.replaceChildren();
+    if (!ov.usage.turns) {
+      usage.appendChild(emptyState('No agent runs yet', 'Turn counts, time, tokens and cost appear after the first run.'));
+    } else {
+      usage.append(
+        usageCell('turns', ov.usage.turns),
+        usageCell('agent time', fmtDuration(ov.usage.durationMs)),
+        usageCell('tool calls', ov.usage.toolCalls),
+        usageCell('tokens', fmtTokens(ov.usage.inputTokens, ov.usage.outputTokens)),
+        usageCell('cost', ov.usage.providerCost != null ? '$' + ov.usage.providerCost.toFixed(2) : '—'),
+      );
+    }
+
+    const recent = $('ov-recent');
+    recent.replaceChildren();
+    const lines = [...ov.recent].reverse().map((e) => timelineLine(e, { withRoom: true })).filter(Boolean);
+    if (!lines.length) {
+      recent.appendChild(emptyState('Quiet so far', 'Live activity from every room lands here.'));
+    } else {
+      recent.append(...lines);
+      recent.scrollTop = recent.scrollHeight;
+    }
+  } catch { /* offline — the pill already says so */ }
+}
+
+function emptyState(title, body) {
+  const box = el('div', 'empty');
+  box.appendChild(el('b', null, title));
+  box.appendChild(document.createTextNode(body));
+  return box;
+}
+
+function feedRecent(event, roomCode) {
+  if (!$('view-overview').classList.contains('on')) return;
+  const line = timelineLine({ ...event, roomCode }, { withRoom: true });
+  if (!line) return;
+  const recent = $('ov-recent');
+  recent.querySelector('.empty')?.remove();
+  recent.appendChild(line);
+  while (recent.children.length > 40) recent.firstChild.remove();
+  recent.scrollTop = recent.scrollHeight;
+}
+
+function usageCell(label, value) {
+  const cell = el('div', 'cell');
+  cell.appendChild(el('span', 'muted', label));
+  cell.appendChild(el('b', null, String(value ?? '—')));
+  return cell;
+}
+
+function barRow(runtime, value, max, caption) {
+  const row = el('div', 'bar');
+  const name = el('span', 'muted');
+  name.appendChild(agentIcon(runtime));
+  name.appendChild(document.createTextNode(' ' + runtime));
+  row.appendChild(name);
+  const track = el('div', 'track');
+  const fill = el('div', 'fill');
+  track.appendChild(fill);
+  row.appendChild(track);
+  row.appendChild(el('em', null, caption));
+  requestAnimationFrame(() => { fill.style.width = (100 * value / max) + '%'; });
+  return row;
+}
+
+// ---- rooms list ---------------------------------------------------------------------
+function renderRooms() {
+  const tbody = $('roomsTable').querySelector('tbody');
+  tbody.replaceChildren();
+  const list = [...rooms.values()].sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+  $('roomsEmpty').style.display = list.length ? 'none' : 'block';
+  for (const r of list) {
+    const online = r.participants?.filter((p) => p.connected).length ?? 0;
+    const attached = r.agents?.filter((a) => a.attached) ?? [];
+    const live = online > 0 || attached.length > 0;
+    const tr = el('tr');
+    tr.tabIndex = 0;
+    const codeTd = el('td');
+    codeTd.appendChild(el('span', 'code-chip' + (live ? '' : ' dim'), r.code));
+    tr.appendChild(codeTd);
+    tr.appendChild(el('td', 'muted', r.title ? clip(r.title, 34) : '—'));
+    const agentsTd = el('td');
+    for (const a of r.agents ?? []) {
+      const wrap = el('span', a.attached ? (a.status === 'working' ? 'pulse' : '') : 'dot-idle');
+      wrap.style.marginRight = '5px';
+      wrap.style.opacity = a.attached ? '1' : '.4';
+      wrap.appendChild(agentIcon(a.runtime, a.agentId + ' · ' + (a.attached ? a.status : 'detached')));
+      agentsTd.appendChild(wrap);
+    }
+    if (!(r.agents ?? []).length) agentsTd.textContent = '—';
+    tr.appendChild(agentsTd);
+    tr.appendChild(el('td', 'muted', String(r.participantsEver?.length ?? r.participants?.length ?? 0)));
+    tr.appendChild(el('td', online ? undefined : 'faint', String(online)));
+    const statusTd = el('td');
+    statusTd.appendChild(statusCell(r));
+    tr.appendChild(statusTd);
+    tr.appendChild(el('td', 'faint', ago(r.lastActivity)));
+    const open = () => { location.hash = '#/room/' + r.code; };
+    tr.onclick = open;
+    tr.onkeydown = (e) => e.key === 'Enter' && open();
+    tbody.appendChild(tr);
+  }
+}
+
+function statusCell(r) {
+  if (r.lifecycle === 'archived') return el('span', 'faint', '▣ archived');
+  if (r.status === 'working') return el('span', 'dot-warn pulse', '● working');
+  if (r.status === 'paused') return el('span', 'dot-warn', '⏸ paused');
+  if (r.status === 'idle') return el('span', 'dot-ok', '● live');
+  const anyone = r.participants?.some((p) => p.connected);
+  return anyone ? el('span', 'dot-ok', '● live') : el('span', 'dot-idle', '○ idle');
+}
+
+// ---- room view -------------------------------------------------------------------------
+function openRoom(code) {
+  if (currentRoom === code) return;
+  closeRoom();
+  currentRoom = code;
+  roomEvents = [];
+  lastSeq = 0;
+  roomState = rooms.get(code) ?? null;
+  renderRoomAll();
+  if (ws?.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'watch_room', code, sinceSeq: 0, key: roomKeys.get(code), auth: auth() }));
+  }
+}
+
+function closeRoom() {
+  if (!currentRoom) return;
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'unwatch_room', code: currentRoom }));
+  joined?.close();
+  joined = null;
+  currentRoom = null;
+}
+
+function pushRoomEvent(event, live) {
+  if (event.seq) lastSeq = Math.max(lastSeq, event.seq);
+  roomEvents.push(event);
+  if (roomEvents.length > 600) roomEvents.splice(0, roomEvents.length - 500);
+  if (live && currentRoom) {
+    const line = filteredLine(event);
+    if (line) {
+      const timeline = $('r-timeline');
+      timeline.appendChild(line);
+      while (timeline.children.length > 400) timeline.firstChild.remove();
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }
+}
+
+function renderRoomAll() { renderRoomHeader(); renderRoomSide(); renderCatchup(); renderTimeline(); }
+
+function renderRoomHeader() {
+  $('r-code').textContent = currentRoom ?? '·····';
+  const r = roomState;
+  const status = $('r-status');
+  status.replaceChildren(r ? statusCell(r) : el('span', 'faint', 'room not found on this server'));
+  $('r-topic').textContent = rooms.get(currentRoom ?? '')?.title ?? '';
+  $('r-addcmd').textContent = 'collagent add ' + (currentRoom ?? 'CODE') + ' --agent <id>';
+
+  const me = joined?.self;
+  const mine = me && r?.participants?.find((p) => p.id === me.participantId);
+  const canDrive = mine && (mine.role === 'host' || r.driverId === mine.id);
+  $('r-join').textContent = joined ? 'leave' : 'join';
+  $('r-pause').disabled = !canDrive;
+  $('r-pause').textContent = r?.status === 'paused' ? 'resume' : 'pause';
+  $('r-archive').disabled = !(mine?.role === 'host');
+  $('r-end').disabled = !(mine?.role === 'host');
+  $('r-instruct').style.display = joined ? 'block' : 'none';
+}
+
+function renderRoomSide() {
+  const r = roomState;
+  const agents = $('r-agents');
+  agents.replaceChildren();
+  const agentFilterSel = $('r-agentfilter');
+  const have = new Set([...agentFilterSel.options].map((o) => o.value));
+  for (const a of r?.agents ?? []) {
+    if (!have.has(a.agentId)) agentFilterSel.appendChild(new Option(a.agentId, a.agentId));
+    const cell = el('div', 'cell');
+    const left = el('span');
+    left.appendChild(agentIcon(a.runtime));
+    left.appendChild(document.createTextNode(' ' + a.agentId));
+    cell.appendChild(left);
+    const right = el('span');
+    right.appendChild(a.attached
+      ? el('span', a.status === 'working' ? 'dot-warn pulse' : 'dot-ok', '● ' + a.status)
+      : el('span', 'dot-idle', '○ detached'));
+    const me = joined?.self;
+    const mine = me && r?.participants?.find((p) => p.id === me.participantId);
+    if (a.attached && mine && (mine.role === 'host' || r.driverId === mine.id)) {
+      const detach = el('button', 'x', ' detach');
+      detach.title = 'detach ' + a.agentId;
+      detach.onclick = () => joined?.control('detach_agent', { target: a.agentId });
+      right.appendChild(detach);
+    }
+    cell.appendChild(right);
+    agents.appendChild(cell);
+    if (a.currentTurnId) {
+      const turnRow = el('div', 'faint', '  └ turn ' + a.currentTurnId.replace('turn_', '') + ' running');
+      turnRow.style.fontSize = '11px';
+      agents.appendChild(turnRow);
+    }
+  }
+  if (!(r?.agents ?? []).length) agents.appendChild(el('p', 'faint', 'no agents yet'));
+
+  const people = $('r-people');
+  people.replaceChildren();
+  for (const p of r?.participants ?? []) {
+    const cell = el('div', 'cell');
+    const marks = [p.role === 'host' && 'host', r.driverId === p.id && 'driver'].filter(Boolean).join(', ');
+    cell.appendChild(el('span', p.connected ? 'dot-ok' : 'dot-idle', (p.connected ? '● ' : '○ ') + p.name));
+    if (marks) cell.appendChild(el('small', null, marks));
+    people.appendChild(cell);
+  }
+  if (!(r?.participants ?? []).length) people.appendChild(el('p', 'faint', 'nobody yet'));
+
+  const meta = $('r-meta');
+  meta.replaceChildren();
+  const metaRows = [
+    ['mode', r?.mode ?? '—'],
+    ['lifecycle', r?.lifecycle ?? '—'],
+    ['workspace', r?.workspaceId ?? 'local'],
+    ['events', r?.eventCount ?? '—'],
+  ];
+  for (const a of r?.agents ?? []) {
+    if (a.nativeSessionId) metaRows.push([a.agentId + ' session', String(a.nativeSessionId).slice(0, 12) + '…']);
+    metaRows.push([a.agentId + ' adapter', a.adapterType]);
+  }
+  for (const [k, v] of metaRows) {
+    const cell = el('div', 'cell');
+    cell.appendChild(el('span', null, k));
+    cell.appendChild(el('span', 'muted', String(v)));
+    meta.appendChild(cell);
+  }
+}
+
+// ---- catch-up card (SINCE YOU WERE AWAY) ------------------------------------------------
+const CATCHUP_THRESHOLD = 40;
+function renderCatchup() {
+  const box = $('r-catchup');
+  box.replaceChildren();
+  const renderable = roomEvents.filter((e) => !CATCHUP_SKIP.has(e.kind));
+  if (renderable.length <= CATCHUP_THRESHOLD) return;
+  const lines = digest(roomEvents);
+  if (!lines.length) return;
+  const card = el('div', 'catchup');
+  card.appendChild(el('p', 'label', 'Since you were away'));
+  for (const line of lines) card.appendChild(el('div', null, line));
+  const working = (roomState?.agents ?? []).filter((a) => a.attached && a.status === 'working').map((a) => a.agentId);
+  if (working.length) card.appendChild(el('div', 'now', '● ' + working.join(', ') + ' currently working'));
+  box.appendChild(card);
+}
+const CATCHUP_SKIP = new Set(['agent_status', 'session_title', 'result']);
+
+// Compact client-side fold of core/catchup.js.
+function digest(events) {
+  const joined = new Set(), left = new Set(), perAgent = new Map();
+  let handoffs = 0, instructions = 0;
+  for (const e of events) {
+    const name = e.actor?.name;
+    if (e.kind === 'participant_joined') joined.add(name);
+    else if (e.kind === 'participant_left') left.add(name);
+    else if (e.kind === 'instruction') instructions++;
+    else if (e.kind === 'turn_completed') perAgent.set(e.agentId, (perAgent.get(e.agentId) ?? 0) + 1);
+    else if (e.kind === 'handoff_completed') handoffs++;
+  }
+  const lines = [];
+  if (joined.size) lines.push('✓ ' + [...joined].slice(0, 4).join(', ') + ' joined');
+  if (left.size) lines.push('✓ ' + [...left].slice(0, 4).join(', ') + ' left');
+  if (instructions) lines.push('✓ ' + instructions + ' instruction' + (instructions === 1 ? '' : 's') + ' given');
+  for (const [agentId, n] of perAgent) lines.push('✓ ' + (agentId ?? 'agent') + ' completed ' + n + ' turn' + (n === 1 ? '' : 's'));
+  if (handoffs) lines.push('✓ ' + handoffs + ' handoff' + (handoffs === 1 ? '' : 's'));
+  return lines.slice(0, 6);
+}
+
+// ---- timeline --------------------------------------------------------------------------
+const AUDIT_KINDS = new Set([
+  'participant_joined', 'participant_left', 'mode_changed', 'handoff_completed',
+  'session_paused', 'session_resumed', 'room_archived', 'session_ended',
+  'agent_session_created', 'agent_session_attached', 'agent_session_detached', 'session_created',
+]);
+const ACTIVITY_SKIP = new Set(['session_title', 'agent_status', 'result', 'participant_disconnected', 'participant_reconnected']);
+
+function filteredLine(e) {
+  if (roomAgentFilter && e.agentId && e.agentId !== roomAgentFilter) return null;
+  if (roomAgentFilter && !e.agentId) return null;
+  const line = timelineLine(e, { audit: roomTab === 'audit' });
+  if (!line) return null;
+  if (roomFilter && !line.classList.contains(roomFilter)) return null;
+  return line;
+}
+
+function renderTimeline() {
+  const timeline = $('r-timeline');
+  timeline.replaceChildren();
+  const lines = roomEvents.map((e) => filteredLine(e)).filter(Boolean);
+  if (!lines.length) {
+    timeline.appendChild(emptyState('Nothing here yet', roomFilter || roomAgentFilter
+      ? 'No events match this filter.'
+      : 'Activity appears the moment something happens.'));
+  } else {
+    timeline.append(...lines.slice(-400));
+    timeline.scrollTop = timeline.scrollHeight;
+  }
+}
+
+function timelineLine(e, { audit = false, withRoom = false } = {}) {
+  if (audit && !AUDIT_KINDS.has(e.kind)) return null;
+  if (!audit && (ACTIVITY_SKIP.has(e.kind) || e.kind === 'session_created')) return null;
+
+  const who = e.actor?.name ?? '';
+  let cls = 'system';
+  let subject = who;
+  let text = '';
+  let quote = null;
+  const d = e.data ?? {};
+
+  switch (e.kind) {
+    case 'instruction':
+      cls = 'human'; text = (e.agentId ? '→ ' + e.agentId + '  ' : 'directed  '); quote = d.text;
+      break;
+    case 'local_prompt':
+      cls = 'human'; subject = 'host terminal'; quote = d.text;
+      break;
+    case 'agent_message':
+      cls = 'agent'; subject = e.agentId ?? who; text = 'replied  '; quote = d.text;
+      break;
+    case 'tool_use':
+      cls = 'agent'; subject = e.agentId ?? who;
+      text = '⚙ ' + (d.tool ?? 'tool') + '  ' + clip(String(d.input ?? '').replace(/\s+/g, ' '), 60);
+      break;
+    case 'tool_result':
+      if (!d.isError) return null;
+      cls = 'error'; subject = e.agentId ?? who;
+      text = '✗ tool failed — ' + clip(String(d.summary ?? '').replace(/\s+/g, ' '), 60);
+      break;
+    case 'turn_started':
+      cls = 'agent'; subject = e.agentId ?? who; text = 'started a turn';
+      break;
+    case 'turn_completed': {
+      cls = 'agent'; subject = e.agentId ?? who;
+      const secs = d.durationMs ? (d.durationMs / 1000).toFixed(1) + 's' : '';
+      const cost = d.usage?.providerCost != null ? ' · $' + d.usage.providerCost.toFixed(4) : '';
+      text = '✓ completed turn' + (secs ? ' · ' + secs : '') + (d.toolCalls ? ' · ' + d.toolCalls + ' tools' : '') + cost;
+      break;
+    }
+    case 'turn_failed': cls = 'error'; subject = e.agentId ?? who; text = '✗ turn failed'; break;
+    case 'participant_joined': cls = 'human'; text = 'joined' + (d.role === 'host' ? ' as host' : ''); break;
+    case 'participant_left': cls = 'human'; text = 'left'; break;
+    case 'participant_disconnected': cls = 'system'; text = 'disconnected'; break;
+    case 'participant_reconnected': cls = 'system'; text = 'reconnected'; break;
+    case 'agent_session_created':
+      cls = 'system'; subject = e.agentId ?? 'agent';
+      text = 'added to the room' + (who && e.actor?.type === 'user' ? ' by ' + who : '');
+      break;
+    case 'agent_session_attached': cls = 'system'; subject = e.agentId ?? 'agent'; text = 'attached'; break;
+    case 'agent_session_detached': cls = 'system'; subject = e.agentId ?? 'agent'; text = 'detached — room stays open'; break;
+    case 'handoff_completed':
+      cls = 'handoff';
+      text = '⇄ handed off to ' + (d.to?.name ?? '?') + (d.context?.objective ? ' — ' + clip(d.context.objective, 40) : '');
+      break;
+    case 'session_paused': cls = 'handoff'; text = '⏸ paused the session'; break;
+    case 'session_resumed': cls = 'handoff'; text = '▶ resumed the session'; break;
+    case 'mode_changed': cls = 'handoff'; text = 'set mode to ' + d.mode; break;
+    case 'room_archived': cls = 'system'; text = '▣ archived the room'; break;
+    case 'session_ended': cls = 'error'; text = '■ ended the session'; break;
+    case 'session_created': cls = 'system'; subject = 'room'; text = 'created'; break;
+    case 'notice': cls = 'system'; subject = 'system'; text = '🔔 ' + clip(String(d.message ?? ''), 90); break;
+    case 'error': cls = 'error'; subject = 'error'; text = clip(String(d.message ?? ''), 90); break;
+    default: return null;
+  }
+
+  const line = el('div', 'tl ' + cls);
+  line.appendChild(el('time', null, hhmm(e.ts)));
+  const body = el('span', 'txt');
+  if (withRoom && (e.roomCode || e.roomId)) body.appendChild(el('span', 'roomtag', '[' + (e.roomCode ?? e.roomId) + '] '));
+  body.appendChild(el('b', 'who', subject + '  '));
+  body.appendChild(document.createTextNode(text));
+  if (quote) body.appendChild(el('q', null, clip(String(quote).split('\n')[0], 90)));
+  line.appendChild(body);
+  return line;
+}
+
+// ---- room controls (real participant protocol) --------------------------------------------
+class Participant {
+  constructor(code) {
+    this.code = code;
+    this.self = null;
+    this.ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    this.ws.onmessage = (m) => {
+      const msg = JSON.parse(m.data);
+      if (msg.type === 'welcome') { this.self = msg.self; renderRoomHeader(); renderRoomSide(); }
+      if (msg.type === 'error') toastError(msg.message);
+    };
+    this.ws.onopen = () => {
+      this.ws.send(JSON.stringify({ type: 'join', code, name: dashboardName(), key: roomKeys.get(code) ?? null, auth: auth() }));
+    };
+    this.ws.onclose = () => { if (joined === this) { joined = null; renderRoomHeader(); } };
+  }
+  send(obj) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify(obj)); }
+  control(action, extra = {}) { this.send({ type: 'control', action, ...extra }); }
+  close() { try { this.send({ type: 'leave' }); this.ws.close(); } catch { /* gone */ } }
+}
+
+$('r-join').onclick = () => {
+  if (joined) { joined.close(); joined = null; renderRoomHeader(); return; }
+  joined = new Participant(currentRoom);
+};
+$('r-pause').onclick = () => joined?.control(roomState?.status === 'paused' ? 'resume' : 'pause');
+$('r-archive').onclick = () => joined?.control('archive');
+$('r-end').onclick = () => { if (confirm('End room ' + currentRoom + ' for everyone?')) joined?.control('end'); };
+$('r-invite').onclick = async () => {
+  const key = roomKeys.get(currentRoom);
+  const invite = 'collagent join ' + currentRoom + (key ? ' --key ' + key : '');
+  try { await navigator.clipboard.writeText(invite); setConn('ok', '● invite copied'); }
+  catch { prompt('Invite command:', invite); }
+  setTimeout(() => { if (ws?.readyState === 1) setConn('ok', '● connected'); }, 2000);
+};
+$('r-input').onkeydown = (event) => {
+  if (event.key !== 'Enter') return;
+  const text = $('r-input').value.trim();
+  if (!text || !joined) return;
+  const at = text.match(/^@(\S+)\s+(.+)$/);
+  joined.send({ type: 'instruction', text: at ? at[2] : text, to: at ? at[1] : null });
+  $('r-input').value = '';
+};
+document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
+  btn.onclick = () => {
+    roomTab = btn.dataset.tab;
+    document.querySelectorAll('.tabs [data-tab]').forEach((b) => b.classList.toggle('on', b === btn));
+    renderTimeline();
+  };
+});
+$('r-filters').querySelectorAll('button').forEach((btn) => {
+  btn.onclick = () => {
+    roomFilter = btn.dataset.f;
+    $('r-filters').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+    renderTimeline();
+  };
+});
+$('r-agentfilter').onchange = () => { roomAgentFilter = $('r-agentfilter').value; renderTimeline(); };
+
+// ---- create room ---------------------------------------------------------------------------
+$('newRoomBtn').onclick = () => {
+  const pick = $('runtimePick');
+  pick.replaceChildren();
+  for (const r of RUNTIMES) {
+    const label = el('label');
+    const radio = el('input');
+    radio.type = 'radio'; radio.name = 'rt'; radio.value = r.id;
+    if (r.id === 'claude') radio.checked = true;
+    label.appendChild(radio);
+    label.appendChild(agentIcon(r.id));
+    label.appendChild(el('span', null, r.label));
+    pick.appendChild(label);
+  }
+  $('create-step1').style.display = 'block';
+  $('create-step2').style.display = 'none';
+  $('createDlg').showModal();
+};
+$('createCancel').onclick = () => $('createDlg').close();
+$('createGo').onclick = () => {
+  const runtime = document.querySelector('#runtimePick input:checked')?.value ?? 'claude';
+  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  sock.onopen = () => sock.send(JSON.stringify({
+    type: 'create_session', name: dashboardName(), agentType: ADAPTER_OF[runtime], auth: auth(),
+  }));
+  sock.onmessage = (m) => {
+    const msg = JSON.parse(m.data);
+    if (msg.type === 'error') { toastError(msg.message); sock.close(); return; }
+    if (msg.type !== 'session_created') return;
+    const code = msg.session.code;
+    if (msg.joinKey) roomKeys.set(code, msg.joinKey);
+    const invite = 'collagent join ' + code + (msg.joinKey ? ' --key ' + msg.joinKey : '');
+    $('created-code').textContent = code;
+    $('created-cmd').textContent = 'collagent open ' + code + (msg.joinKey ? ' --key ' + msg.joinKey : '');
+    $('create-step1').style.display = 'none';
+    $('create-step2').style.display = 'block';
+    $('copyCodeBtn').onclick = () => navigator.clipboard?.writeText(code);
+    $('copyInviteBtn').onclick = () => navigator.clipboard?.writeText(invite);
+    $('createDone').onclick = () => {
+      $('createDlg').close();
+      // Release the seat so the machine running `collagent open` adopts the
+      // room as host and receives the agent re-attach grant.
+      sock.send(JSON.stringify({ type: 'leave' }));
+      sock.close();
+      ws?.send(JSON.stringify({ type: 'watch', auth: auth() }));
+      location.hash = '#/room/' + code;
+    };
+  };
+};
+
+// ---- join room -------------------------------------------------------------------------------
+$('joinRoomBtn').onclick = () => {
+  $('joinCode').value = '';
+  $('joinKey').value = '';
+  $('joinDlg').showModal();
+  $('joinCode').focus();
+};
+$('joinCancel').onclick = () => $('joinDlg').close();
+$('joinGo').onclick = () => {
+  const code = $('joinCode').value.trim().toUpperCase();
+  if (!code) return;
+  const key = $('joinKey').value.trim();
+  if (key) roomKeys.set(code, key);
+  $('joinDlg').close();
+  location.hash = '#/room/' + code;
+};
+$('joinCode').onkeydown = (e) => e.key === 'Enter' && $('joinGo').click();
+
+// ---- analytics ---------------------------------------------------------------------------------
+let anHours = 168;
+$('an-ranges').querySelectorAll('button').forEach((btn) => {
+  btn.onclick = () => {
+    anHours = Number(btn.dataset.h);
+    $('an-ranges').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+    refreshAnalytics();
+  };
+});
+$('an-room').onchange = refreshAnalytics;
+$('an-runtime').onchange = refreshAnalytics;
+
+async function refreshAnalytics() {
+  const roomSel = $('an-room');
+  const have = new Set([...roomSel.options].map((o) => o.value));
+  for (const code of rooms.keys()) if (!have.has(code)) roomSel.appendChild(new Option(code, code));
+  const rtSel = $('an-runtime');
+  if (rtSel.options.length === 1) for (const r of RUNTIMES) rtSel.appendChild(new Option(r.label, r.id));
+
+  const params = new URLSearchParams({ sinceHours: String(anHours) });
+  if (roomSel.value) params.set('room', roomSel.value);
+  if (rtSel.value) params.set('runtime', rtSel.value);
+  let an;
+  try {
+    const res = await fetch('/api/analytics?' + params, { headers: headers() });
+    if (!res.ok) return;
+    an = await res.json();
+  } catch { return; }
+
+  const bars = $('an-bars');
+  bars.replaceChildren();
+  const entries = Object.entries(an.byRuntime).sort((a, b) => b[1].runs - a[1].runs);
+  const maxRuns = Math.max(1, ...entries.map(([, v]) => v.runs));
+  for (const [rt, v] of entries) {
+    bars.appendChild(barRow(rt, v.runs, maxRuns,
+      v.runs + (v.providerCost != null ? ' · $' + v.providerCost.toFixed(2) : '')));
+  }
+  if (!entries.length) bars.appendChild(emptyState('No agent runs in this window', 'Widen the range or clear the filters.'));
+
+  const usage = $('an-usage');
+  usage.replaceChildren();
+  if (!an.totals.runs && !an.totals.instructions) {
+    usage.appendChild(emptyState('Nothing to report', 'Metrics appear once agents run in this window.'));
+  } else {
+    usage.append(
+      usageCell('runs', an.totals.runs),
+      usageCell('failed', an.totals.failed),
+      usageCell('agent time', fmtDuration(an.totals.durationMs)),
+      usageCell('tool calls', an.totals.toolCalls),
+      usageCell('tokens', fmtTokens(an.totals.inputTokens, an.totals.outputTokens)),
+      usageCell('cost', an.totals.providerCost != null ? '$' + an.totals.providerCost.toFixed(2) : '—'),
+    );
+  }
+  $('an-coord').replaceChildren(
+    usageCell('human instructions', an.totals.instructions),
+    usageCell('host prompts', an.totals.localPrompts),
+    usageCell('handoffs', an.totals.handoffs),
+    usageCell('agent attaches', an.totals.agentAttaches),
+    usageCell('errors', an.totals.errors),
+  );
+
+  const spark = $('an-spark');
+  spark.replaceChildren();
+  const buckets = an.activity.slice(-48);
+  const maxEvents = Math.max(1, ...buckets.map((b) => b.events));
+  for (const b of buckets) {
+    const bar = el('i', b.events > maxEvents * 0.6 ? 'hot' : null);
+    bar.title = new Date(b.ts).toLocaleString() + ' — ' + b.events + ' events · ' + b.rooms + ' room(s)';
+    spark.appendChild(bar);
+    requestAnimationFrame(() => { bar.style.height = Math.max(4, 100 * b.events / maxEvents) + '%'; });
+  }
+  $('an-sparkmeta').textContent = buckets.length ? '· last ' + buckets.length + 'h with data' : '· no data in window';
+}
+
+// ---- settings (connection pill) ------------------------------------------------------------------
+$('conn').onclick = () => {
+  $('tokenInput').value = token ?? '';
+  $('nameInput').value = dashboardName();
+  $('settingsDlg').showModal();
+};
+$('settingsCancel').onclick = () => $('settingsDlg').close();
+$('settingsSave').onclick = () => {
+  token = $('tokenInput').value.trim() || null;
+  const name = $('nameInput').value.trim();
+  try {
+    if (token) localStorage.setItem('collagent.token', token);
+    else localStorage.removeItem('collagent.token');
+    if (name) localStorage.setItem('collagent.name', name);
+  } catch { /* private mode */ }
+  $('settingsDlg').close();
+  ws?.close(); // reconnect with the new identity
+};
+
+// ---- misc --------------------------------------------------------------------------------------------
+function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
+function hhmm(ts) {
+  if (!ts) return '--:--';
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function ago(ts) {
+  if (!ts) return '—';
+  const s = (Date.now() - ts) / 1000;
+  if (s < 5) return 'now';
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+function fmtDuration(ms) {
+  if (!ms) return '0m';
+  const h = ms / 3_600_000;
+  return h >= 1 ? h.toFixed(1) + 'h' : Math.round(ms / 60_000) + 'm';
+}
+function fmtTokens(input, output) {
+  if (input == null && output == null) return '—';
+  const total = (input ?? 0) + (output ?? 0);
+  return total >= 1e6 ? (total / 1e6).toFixed(1) + 'M' : total >= 1e3 ? (total / 1e3).toFixed(1) + 'K' : String(total);
+}
+
+setInterval(() => { if ($('view-rooms').classList.contains('on')) renderRooms(); }, 15_000);
+setInterval(() => { if ($('view-overview').classList.contains('on')) refreshOverview(); }, 20_000);
+
+connect();
+route();
+</script>
+</body>
+</html>

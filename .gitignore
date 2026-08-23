@@ -6,3 +6,6 @@ npm-debug.log*
 # cursor-native temporarily merges its hook forwarder into the hosted
 # workspace's .cursor/hooks.json — never commit one left behind by a crash
 .cursor/
+
+# docs site build output — regenerate with: npm run docs:build
+docs-site/dist/

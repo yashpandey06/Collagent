@@ -9,12 +9,15 @@ import {
   createAdapter, describeAdapter, adapterFor, findRuntime,
   runtimeLabel, runtimeGlyph, isRuntimeInstalled, runtimesWithInstallState, RUNTIMES,
 } from '../adapters/registry.js';
-import { startTui, renderEvent, renderPresence, renderRoomList, ago } from '../ui/tui.js';
+import { startTui, renderEvent, renderPresence, renderAgents, renderRoomList, ago } from '../ui/tui.js';
 import { paint } from '../ui/colors.js';
 import { printLogo } from '../ui/brand.js';
 import { pickRuntime, pickRooms, confirmDanger } from '../ui/picker.js';
 import { buildRoomSummary } from '../core/room-summary.js';
+import { catchupSummary, currentActivity } from '../core/catchup.js';
 import { defaultDataDir } from '../core/session-manager.js';
+import { loadRoomState, saveRoomState } from './room-store.js';
+import { uuid } from '../core/ids.js';
 import { VERSION } from '../version.js';
 
 export const DEFAULT_PORT = 7717;
@@ -30,14 +33,16 @@ function printHelp() {
   console.log('');
   [
     ['create', "start a shared room around a coding agent's own UI"],
-    ['join <code>', 'join a room — its full history replays'],
+    ['join <code>', 'join a room — catch-up first, then live'],
     ['open <code>', 'reopen a saved room as host, agent resumes'],
+    ['add <code>', 'add another agent to a room (multi-agent)'],
     ['rooms', "list your rooms — topics, people, recency"],
     ['agents', 'the coding agents collagent supports'],
     ['status <code>', "one room's state and participants"],
     ['delete [code]', 'delete rooms — bare delete opens a picker'],
     ['leave', 'leave the last room you joined'],
-    ['serve', 'run a session server for your team'],
+    ['serve', 'run a session server (hosted backend)'],
+    ['dev', 'local dev server with sensible defaults'],
   ].forEach(row);
   console.log('');
 
@@ -47,12 +52,14 @@ function printHelp() {
     ['--agent <id>', 'which coding agent (see: collagent agents)'],
     ['--name <name>', 'your display name in the room'],
     ['--server <url>', `session server (default ws://127.0.0.1:${DEFAULT_PORT})`],
+    ['--key <key>', 'join key for rooms on remote servers'],
     ['--headless', "collagent's feed UI instead of the agent's own"],
     ['--cwd <dir>', 'working directory for the agent'],
     ['--model <model>', 'model override'],
   ].forEach(row);
   console.log('');
-  console.log(paint.dim('  advanced: --adapter <type> · --permission-mode <m> (headless; default acceptEdits) · --port/--host for serve'));
+  console.log(paint.dim('  advanced: --adapter <type> · --permission-mode <m> (headless) · serve: --port/--host/--pg <url>'));
+  console.log(paint.dim('  env: DATABASE_URL · COLLAGENT_REQUIRE_AUTH · COLLAGENT_CORS_ORIGINS · COLLAGENT_TLS_CERT/KEY · COLLAGENT_LOG_FORMAT=json'));
   console.log('');
 }
 
@@ -62,8 +69,10 @@ export async function run(argv) {
 
   switch (command) {
     case 'serve': return cmdServe(opts);
+    case 'dev': return cmdDev(opts);
     case 'create': return cmdCreate(opts);
     case 'open': return cmdOpen(opts);
+    case 'add': return cmdAdd(opts);
     case 'agents':
     case 'agent': return cmdAgents();
     case 'rooms':
@@ -109,16 +118,90 @@ function parseFlags(args) {
 const defaultName = () => process.env.COLLAGENT_NAME || os.userInfo().username;
 const defaultServer = (opts) => opts.server || process.env.COLLAGENT_SERVER || `ws://127.0.0.1:${DEFAULT_PORT}`;
 
+// A stable local user id — participant identity across rooms on this machine.
+function identity() {
+  const file = path.join(defaultDataDir(), 'identity.json');
+  try {
+    const existing = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (existing.userId) return existing;
+  } catch { /* first run */ }
+  const fresh = { userId: `u_${uuid().slice(0, 12)}`, createdAt: Date.now() };
+  try {
+    fs.mkdirSync(defaultDataDir(), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(fresh), { mode: 0o600 });
+  } catch { /* non-fatal */ }
+  return fresh;
+}
+
+// Remote servers require a registered user; first contact registers one and
+// stores the token per server origin (0600). Loopback servers skip auth.
+async function ensureAuth(serverUrl, name) {
+  if (isLocalHost(serverUrl)) return null;
+  const origin = httpUrl(serverUrl);
+  const file = path.join(defaultDataDir(), 'credentials.json');
+  let all = {};
+  try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first use */ }
+  if (all[origin]?.token) return all[origin];
+  try {
+    const res = await fetch(`${origin}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null; // server predates auth, or registration is closed
+    const account = await res.json();
+    all[origin] = { userId: account.userId, token: account.token, name: account.name };
+    fs.mkdirSync(defaultDataDir(), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(all), { mode: 0o600 });
+    console.log(paint.dim(`  registered on ${origin} as ${account.name}`));
+    return all[origin];
+  } catch {
+    return null;
+  }
+}
+
+async function connectClient(serverUrl, name) {
+  const auth = await ensureAuth(serverUrl, name);
+  const client = new CollagentClient({
+    serverUrl,
+    name,
+    userId: auth?.userId ?? identity().userId,
+    auth: auth ? { token: auth.token } : null,
+  });
+  await client.connect();
+  return client;
+}
+
 // ---- commands ------------------------------------------------------------
 
-async function cmdServe(opts) {
-  const port = Number(opts.port ?? DEFAULT_PORT);
-  const host = opts.host ?? '0.0.0.0';
+function makeLogger() {
+  if ((process.env.COLLAGENT_LOG_FORMAT ?? '').toLowerCase() === 'json') {
+    return (msg, fields = {}) =>
+      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', msg, ...fields }));
+  }
+  return (...a) => console.log(paint.dim('[server]'), ...a.map((x) => (typeof x === 'object' ? JSON.stringify(x) : x)));
+}
+
+function loadTls() {
+  const cert = process.env.COLLAGENT_TLS_CERT;
+  const key = process.env.COLLAGENT_TLS_KEY;
+  if (!cert || !key) return null;
+  return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
+}
+
+async function cmdServe(opts, { dev = false } = {}) {
+  const port = Number(opts.port ?? process.env.PORT ?? DEFAULT_PORT);
+  // Loopback by default: exposing the server is an explicit choice.
+  const host = opts.host ?? process.env.HOST ?? '127.0.0.1';
+  const tls = loadTls();
   const server = createCollagentServer({
     dataDir: defaultDataDir(),
-    log: (...a) => console.log(paint.dim('[server]'), ...a),
+    ...(opts.pg ? { databaseUrl: opts.pg } : {}),
+    tls,
+    log: makeLogger(),
   });
-  const addr = await server.listen(port, host);
+  const addr = await listenTakingOver(server, port, host);
   try {
     fs.mkdirSync(defaultDataDir(), { recursive: true });
     fs.writeFileSync(
@@ -126,8 +209,58 @@ async function cmdServe(opts) {
       JSON.stringify({ pid: process.pid, port: addr.port, version: VERSION }),
     );
   } catch { /* non-fatal */ }
-  console.log(`collagent server v${VERSION} listening on http://${host}:${addr.port}  (ws path: /ws)`);
-  console.log(paint.dim(`rooms & history: ${path.join(defaultDataDir(), 'history')}`));
+
+  const scheme = tls ? 'https' : 'http';
+  const backend = server.manager.store.backend;
+  console.log(`collagent server v${VERSION} listening on ${scheme}://${host}:${addr.port}  (ws path: /ws)`);
+  console.log(paint.dim(`dashboard: ${scheme}://${host === '0.0.0.0' ? 'localhost' : host}:${addr.port}/ · docs: /docs`));
+  console.log(paint.dim(`store: ${backend}${backend === 'postgres' ? '' : ` · rooms & history: ${path.join(defaultDataDir(), 'history')}`}`));
+  if (host === '127.0.0.1') {
+    console.log(paint.dim('local only — for a team server run: collagent serve --host 0.0.0.0 (joins then need auth + each room\'s key)'));
+  } else {
+    console.log(paint.yellow(`reachable from the network — remote clients register once (POST /api/auth/register) and joins need each room's key; admin API needs ${path.join(defaultDataDir(), 'admin-token')}`));
+  }
+  if (dev) {
+    console.log('');
+    console.log(paint.dim('  dev mode — try it:'));
+    console.log(paint.dim('    collagent create            # terminal 2'));
+    console.log(paint.dim(`    open ${scheme}://localhost:${addr.port}/   # web viewer`));
+  }
+
+  // Graceful shutdown: finish in-flight writes, tell clients, release the DB.
+  const stop = async (signal) => {
+    console.log(paint.dim(`\n${signal} — shutting down gracefully…`));
+    await server.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGINT', () => stop('SIGINT'));
+}
+
+/** `collagent dev` — local services with sensible defaults, one command. */
+async function cmdDev(opts) {
+  printLogo('dev server');
+  return cmdServe(opts, { dev: true });
+}
+
+// A stale collagent daemon (often auto-started by `create`) may hold the
+// port; `serve`/`dev` mean "I am the server now", so stop it and take over.
+async function listenTakingOver(server, port, host) {
+  try {
+    return await server.listen(port, host);
+  } catch (err) {
+    if (err.code !== 'EADDRINUSE') throw err;
+    const url = `ws://127.0.0.1:${port}`;
+    const health = await serverHealth(url);
+    if (!health) {
+      throw new Error(`port ${port} is in use by something that isn't collagent — pick another: collagent dev --port ${port + 1}`);
+    }
+    console.log(paint.dim(`a collagent server (v${health.version}) already holds port ${port} — taking over…`));
+    if (!(await stopLocalServer(url))) {
+      throw new Error(`could not stop it — kill it manually: lsof -ti tcp:${port} | xargs kill`);
+    }
+    return server.listen(port, host);
+  }
 }
 
 async function cmdCreate(opts) {
@@ -146,12 +279,18 @@ async function cmdCreate(opts) {
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
 
-  const client = new CollagentClient({ serverUrl, name });
-  await client.connect();
+  const client = await connectClient(serverUrl, name);
   const created = await client.createSession({ agentType: adapterType });
-  saveState({ serverUrl, code: created.session.code, self: client.self, name });
+  const code = created.session.code;
+  saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey });
+  saveRoomState(code, {
+    participantId: client.self.participantId,
+    resumeToken: client.self.resumeToken,
+    name: client.name,
+    key: client.joinKey,
+  });
 
-  await hostRoom({ client, code: created.session.code, serverUrl, opts, adapterType, verb: 'created' });
+  await hostRoom({ client, code, serverUrl, opts, adapterType, verb: 'created' });
 }
 
 async function cmdOpen(opts) {
@@ -166,18 +305,27 @@ async function cmdOpen(opts) {
   const serverUrl = defaultServer(opts);
   await ensureServer(serverUrl);
 
-  const client = new CollagentClient({ serverUrl, name });
-  await client.connect();
-  const welcome = await client.join(code);
-  saveState({ serverUrl, code, self: client.self, name });
+  const client = await connectClient(serverUrl, name);
+  const stored = loadRoomState(code);
+  const welcome = await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
+  saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey ?? stored?.key });
+  saveRoomState(code, {
+    participantId: client.self.participantId,
+    resumeToken: client.self.resumeToken,
+    name: client.name,
+  });
 
   if (!client.agentToken) {
-    console.log(paint.yellow(`  Room ${code} already has a host — joining you as a collaborator instead.`));
-    return enterRoomFeed({ client, welcome, name, code });
+    console.log(paint.yellow(`  Room ${code} already has its agents attached — joining you as a collaborator instead.`));
+    return enterRoomFeed({ client, welcome, name, code, serverUrl, lastSeenSeq: stored?.lastSeenSeq ?? 0 });
   }
 
-  // a saved room already knows its agent; only re-ask if the caller overrides
-  let adapterType = welcome.session?.agentType;
+  // Reopen resumes the room's primary agent in this terminal; other detached
+  // agent sessions are listed so they can be re-added from other terminals.
+  const grants = client.agentGrants ?? [];
+  const primary = grants.find((g) => g.agentToken === client.agentToken) ?? grants[0] ?? null;
+
+  let adapterType = primary?.adapterType ?? welcome.session?.agentType;
   if (opts.adapter || opts.agent || opts.runtime || !isKnownAdapter(adapterType)) {
     adapterType = await resolveAdapter(opts);
     if (!adapterType) return;
@@ -185,11 +333,56 @@ async function cmdOpen(opts) {
     requireInstalled(findRuntime(describeAdapter(adapterType).runtime));
   }
 
+  for (const g of grants.filter((x) => x !== primary)) {
+    console.log(paint.dim(`  ${g.agentId} is still detached — bring it back with: collagent add ${code} --agent ${describeAdapter(g.adapterType).runtime}`));
+  }
+
   await hostRoom({
     client, code, serverUrl, opts,
     adapterType,
     verb: 'reopened',
-    resumeId: welcome.agentSessionId ?? null,
+    agentToken: primary?.agentToken ?? client.agentToken,
+    resumeId: primary?.nativeSessionId ?? welcome.agentSessionId ?? null,
+  });
+}
+
+/**
+ * `collagent add <code>` — the multi-agent opt-in: attach one more agent to
+ * an existing room from this terminal. Native adapters take the terminal
+ * over exactly like `create`; `--headless` keeps the collagent feed instead.
+ */
+async function cmdAdd(opts) {
+  const code = (opts._[0] ?? loadState()?.code ?? '').toUpperCase();
+  if (!code) {
+    console.error('usage: collagent add <code> [--agent <id>] [--headless]');
+    process.exitCode = 1;
+    return;
+  }
+  printLogo(`adding an agent to room ${code}…`);
+  const adapterType = await resolveAdapter(opts);
+  if (!adapterType) return;
+  console.log(`  ${paint.green('✓')} ${paint.bold(runtimeLabel(adapterType))}`);
+  console.log('');
+
+  const name = opts.name ?? defaultName();
+  const serverUrl = defaultServer(opts);
+  const client = await connectClient(serverUrl, name);
+  const stored = loadRoomState(code);
+  await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
+  saveRoomState(code, {
+    participantId: client.self.participantId,
+    resumeToken: client.self.resumeToken,
+    name: client.name,
+  });
+
+  const added = await client.addAgent(adapterType);
+  console.log(`  ${paint.green('✓')} ${paint.bold(added.agent.agentId)} joined room ${code} ${paint.dim(`· address it with @${added.agent.agentId}`)}`);
+
+  await hostRoom({
+    client, code, serverUrl, opts,
+    adapterType,
+    verb: 'extended',
+    agentToken: added.agentToken,
   });
 }
 
@@ -394,16 +587,20 @@ async function listRooms(serverUrl) {
   return { rooms, offline: true };
 }
 
-async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resumeId = null }) {
+async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resumeId = null, agentToken = null }) {
   const label = runtimeLabel(adapterType);
   const mark = runtimeGlyph(adapterType);
+  const remote = isRemoteable(serverUrl);
+  const key = client.joinKey ?? loadState()?.joinKey ?? null;
   const banner = () => {
     console.log('');
     // The chip keeps the brand on the line people screenshot and share.
     console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold(`Room ${verb}`)}  ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${label}`);
     console.log('');
-    console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(`collagent join ${code}`)}${isRemoteable(serverUrl) ? ` ${paint.dim(`--server ${serverUrl}`)}` : ''}`);
-    console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code))}`);
+    const invite = `collagent join ${code}${remote && key ? ` --key ${key}` : ''}`;
+    console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(invite)}${remote ? ` ${paint.dim(`--server ${serverUrl}`)}` : ''}`);
+    console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code) + (remote && key ? `&key=${key}` : ''))}`);
+    console.log(`    ${paint.dim('Add a 2nd agent')}    ${paint.dim(`collagent add ${code} --agent <id>   (or /add in a feed terminal)`)}`);
     if (resumeId) {
       console.log(`    ${paint.dim('Resuming')}           ${paint.dim(`${label} conversation ${resumeId.slice(0, 8)}… continues where it left off`)}`);
     }
@@ -425,7 +622,7 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
       setTimeout(() => process.exit(0), 300);
     },
   });
-  const host = new AgentHost({ serverUrl, code, agentToken: client.agentToken, adapter });
+  const host = new AgentHost({ serverUrl, code, agentToken: agentToken ?? client.agentToken, adapter });
 
   if (descriptor.ownsTerminal) {
     banner();
@@ -447,10 +644,13 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
   console.log(paint.dim(`  Type to instruct ${label} · /help for commands`));
   console.log('');
 
+  const addAgent = makeAddAgent({ client, serverUrl, code });
   startTui({
     client,
     agentLabel: label,
+    onAddAgent: addAgent,
     onQuit: async () => {
+      await addAgent.stopAll();
       await host.stop();
       client.close();
       process.exit(0);
@@ -458,10 +658,42 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
   });
 }
 
+/**
+ * /add from a feed terminal: this participant becomes the new agent's host.
+ * The feed keeps the terminal, so the added agent always runs headless here;
+ * a native UI wants its own terminal (`collagent add <code>`).
+ */
+function makeAddAgent({ client, serverUrl, code }) {
+  const hosts = [];
+  const fn = async (spec) => {
+    let adapterType;
+    if (spec === 'mock') {
+      adapterType = 'mock'; // demos and tests
+    } else {
+      const runtime = findRuntime(spec);
+      if (!runtime) {
+        throw new Error(`unknown agent "${spec}" (agents: ${RUNTIMES.map((r) => r.id).join(', ')})`);
+      }
+      requireInstalled(runtime);
+      adapterType = adapterFor(runtime.id, { headless: true });
+    }
+    const added = await client.addAgent(adapterType);
+    const adapter = createAdapter(adapterType, { cwd: process.cwd() });
+    const host = new AgentHost({ serverUrl, code, agentToken: added.agentToken, adapter });
+    await host.start();
+    hosts.push(host);
+    return { agentId: added.agent.agentId };
+  };
+  fn.stopAll = async () => {
+    for (const h of hosts) await h.stop().catch(() => {});
+  };
+  return fn;
+}
+
 async function cmdJoin(opts) {
   const code = (opts._[0] ?? '').toUpperCase();
   if (!code) {
-    console.error('usage: collagent join <code>');
+    console.error('usage: collagent join <code> [--key <key>]');
     process.exitCode = 1;
     return;
   }
@@ -469,24 +701,59 @@ async function cmdJoin(opts) {
   const name = opts.name ?? defaultName();
   const serverUrl = defaultServer(opts);
 
-  const client = new CollagentClient({ serverUrl, name });
-  await client.connect();
-  const welcome = await client.join(code);
+  const client = await connectClient(serverUrl, name);
+  const stored = loadRoomState(code);
+  const key = opts.key ?? stored?.key ?? null;
+  const welcome = await rejoinOrJoin(client, code, { stored, key });
   saveState({ serverUrl, code, self: client.self, name });
-  enterRoomFeed({ client, welcome, name, code });
+  saveRoomState(code, {
+    participantId: client.self.participantId,
+    resumeToken: client.self.resumeToken,
+    name: client.name,
+    ...(key ? { key } : {}),
+  });
+  enterRoomFeed({ client, welcome, name, code, serverUrl, lastSeenSeq: stored?.lastSeenSeq ?? 0 });
 }
 
-// Status churn and title changes are metadata, not conversation — skip in replay.
-const REPLAY_SKIP = new Set(['agent_status', 'session_title']);
+// Returning users keep their seat (and read position); first-timers join.
+async function rejoinOrJoin(client, code, { stored, key }) {
+  if (stored?.participantId && stored?.resumeToken) {
+    try {
+      client._send({
+        type: 'rejoin',
+        code,
+        participantId: stored.participantId,
+        resumeToken: stored.resumeToken,
+        sinceSeq: 0,
+      });
+      return await client._await('reconnected');
+    } catch { /* seat gone (room restarted, participant removed) — join fresh */ }
+  }
+  return client.join(code, { key });
+}
 
-function enterRoomFeed({ client, welcome, name, code }) {
+// Status churn, title changes and turn/session structure are metadata, not
+// conversation — skip in raw replay (the catch-up digest covers them).
+const REPLAY_SKIP = new Set([
+  'agent_status', 'session_title',
+  'turn_started', 'turn_completed', 'turn_failed',
+  'agent_session_created', 'agent_session_attached', 'agent_session_detached',
+]);
+
+// Long histories get a digest + tail instead of a full raw replay.
+const REPLAY_FULL_LIMIT = 40;
+const REPLAY_TAIL = 12;
+
+function enterRoomFeed({ client, welcome, name, code, serverUrl, lastSeenSeq = 0 }) {
   const agentType = welcome.session?.agentType ?? client.session?.agentType;
   const agentLabel = runtimeLabel(agentType);
   const mark = runtimeGlyph(agentType);
   const online = client.session.participants.filter((p) => p.connected).length;
   const topic = buildRoomSummary(welcome.events).title;
+  const agents = client.session.agents ?? [];
+  const agentCell = agents.length > 1 ? `${agents.length} agents` : agentLabel;
   console.log('');
-  console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold("You're in")} ${paint.dim('·')} room ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${agentLabel} ${paint.dim('·')} ${online} ${online === 1 ? 'person' : 'people'} here`);
+  console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold("You're in")} ${paint.dim('·')} room ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${agentCell} ${paint.dim('·')} ${online} ${online === 1 ? 'person' : 'people'} here`);
   if (topic) console.log(`    ${paint.dim('Topic:')} ${paint.bold(topic)}`);
   if (client.name !== name) {
     console.log(paint.yellow(`    heads-up: "${name}" was taken, so you're "${client.name}" here (--name picks another)`));
@@ -495,23 +762,56 @@ function enterRoomFeed({ client, welcome, name, code }) {
   console.log(renderPresence(client.session, client.self.participantId, { agentLabel }));
   console.log('');
 
-  const history = welcome.events.filter((e) => !REPLAY_SKIP.has(e.kind));
-  if (history.length) {
-    console.log(paint.dim(`— catching you up · ${history.length} events —`));
-    for (const event of history) {
-      const line = renderEvent(event, { selfId: client.self.participantId, agentLabel });
+  const multiAgent = agents.length > 1;
+  const render = (event) => renderEvent(event, { selfId: client.self.participantId, agentLabel, multiAgent });
+  const missed = lastSeenSeq > 0 ? welcome.events.filter((e) => e.seq > lastSeenSeq) : welcome.events;
+  const replayable = missed.filter((e) => !REPLAY_SKIP.has(e.kind));
+
+  if (replayable.length > REPLAY_FULL_LIMIT) {
+    // Catch-up card: what happened, then just the tail of the feed.
+    console.log(paint.bold(lastSeenSeq > 0 ? 'SINCE YOU WERE AWAY' : 'THE STORY SO FAR'));
+    console.log('');
+    for (const line of catchupSummary(missed, { selfName: client.name })) console.log(paint.green(line));
+    const activity = currentActivity(client.session);
+    if (activity) console.log(paint.yellow(activity));
+    console.log('');
+    console.log(paint.dim(`— last ${REPLAY_TAIL} of ${replayable.length} events — full history stays in the room —`));
+    for (const event of replayable.slice(-REPLAY_TAIL)) {
+      const line = render(event);
+      if (line) console.log(line);
+    }
+    console.log(paint.dim('──────── YOU ARE HERE ────────'));
+    console.log('');
+  } else if (replayable.length) {
+    console.log(paint.dim(`— catching you up · ${replayable.length} events —`));
+    for (const event of replayable) {
+      const line = render(event);
       if (line) console.log(line);
     }
     console.log(paint.dim("— you're all caught up —"));
     console.log('');
   }
-  console.log(paint.dim(`  Type to instruct ${agentLabel} · /help for commands`));
+  console.log(paint.dim(`  Type to instruct ${agentCell} · /help for commands`));
   console.log('');
 
+  // Remember how far this user has read (throttled; powers the next catch-up).
+  let saveTimer = null;
+  client.on('event', () => {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      saveRoomState(code, { lastSeenSeq: client.lastSeq });
+    }, 2000);
+  });
+
+  const addAgent = makeAddAgent({ client, serverUrl: serverUrl ?? defaultServer({}), code });
   startTui({
     client,
     agentLabel,
-    onQuit: () => {
+    onAddAgent: addAgent,
+    onQuit: async () => {
+      saveRoomState(code, { lastSeenSeq: client.lastSeq });
+      await addAgent.stopAll();
       client.close();
       process.exit(0);
     },
@@ -536,6 +836,7 @@ async function cmdStatus(opts) {
   console.log('');
   console.log(renderRoomList(withAgentLabels([s]), { homedir: os.homedir(), header: false }));
   console.log(renderPresence(s, null, { agentLabel: runtimeLabel(s.agentType) }));
+  if ((s.agents?.length ?? 0) > 1) console.log(renderAgents(s, { agentLabel: runtimeLabel(s.agentType) }));
   console.log(paint.dim(`  ${s.mode} mode · created ${ago(s.createdAt)} · invite: collagent join ${s.code}`));
   console.log('');
 }
@@ -752,17 +1053,23 @@ async function ensureServer(serverUrl) {
 
 async function stopLocalServer(serverUrl) {
   const wantPort = Number(new URL(serverUrl.replace(/^ws/, 'http')).port || DEFAULT_PORT);
+  // server.json names the last server started on ANY port — trust it only
+  // when it matches; otherwise (or when its pid is gone) kill the port owner.
+  let killed = false;
   try {
     const info = JSON.parse(fs.readFileSync(path.join(defaultDataDir(), 'server.json'), 'utf8'));
-    if (info.port === wantPort && info.pid) process.kill(info.pid, 'SIGTERM');
-  } catch {
-    // pre-0.1.x servers wrote no server.json; fall back to the port owner
+    if (info.port === wantPort && info.pid) {
+      process.kill(info.pid, 'SIGTERM');
+      killed = true;
+    }
+  } catch { /* no file, unreadable, or the pid is already gone */ }
+  if (!killed) {
     try {
       const { execSync } = await import('node:child_process');
       execSync(`lsof -ti tcp:${wantPort} -sTCP:LISTEN | xargs kill`, { stdio: 'ignore' });
-    } catch { /* handled below */ }
+    } catch { /* verified below via health */ }
   }
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 30; i++) {
     if (!(await serverHealth(serverUrl))) return true;
     await new Promise((r) => setTimeout(r, 100));
   }

@@ -2,15 +2,17 @@
 
 **Multiplayer infrastructure for AI agents.**
 
-Collagent lets multiple people connect to and collaborate around the **same live agent session**. It supports **Claude Code**, **Codex**, **Cursor**, **Gemini CLI**, **OpenCode**, and **Goose** today, each through its own adapter. The core knows nothing about any of them, so new runtimes plug in without touching it.
+Collagent lets multiple people — and, when you want it, multiple agents — collaborate in the **same persistent room**. It supports **Claude Code**, **Codex**, **Cursor**, **Gemini CLI**, **OpenCode**, and **Goose** today, each through its own adapter. The core knows nothing about any of them, so new runtimes plug in without touching it.
 
 ```text
-Human A ──┐
-Human B ──┼── Collagent Session ── Agent Runtime (Claude Code)
-Human C ──┘
+Human A ──┐                    ┌── AgentSession (Claude Code)
+Human B ──┼── Collagent Room ──┼── AgentSession (Codex)      ← optional
+Human C ──┘                    └── AgentSession (Cursor)     ← optional
 ```
 
-Collagent does **not** replace the agent or become another coding workspace. Claude Code remains responsible for coding, terminal access, files, permissions and execution. Collagent provides the shared session layer: participant identity and presence, event streaming, instruction routing, permissions/handoff, pause/resume, and history.
+**A new room starts with exactly one agent and behaves exactly like it always has.** Multi-agent is an explicit opt-in (`collagent add`, or `/add` in a feed terminal); until you use it there are no agent pickers, no `@` addressing, no extra ceremony. Each agent session keeps its own native conversation, tools and runtime state — the room is the shared coordination layer (events, decisions, handoffs), never a merged conversation.
+
+Collagent does **not** replace the agent or become another coding workspace. The agent remains responsible for coding, terminal access, files, permissions and execution. Collagent provides the shared room layer: participant identity and presence, event streaming with turn ids, instruction routing, permissions/handoff, pause/resume, catch-up, and durable history.
 
 ## Quick start
 
@@ -71,7 +73,7 @@ Opening your normal Claude Code — teammates' instructions appear right in its 
 ```bash
 $ collagent join 7FK2P --name Bob
 # or from another machine:
-$ collagent join 7FK2P --name Bob --server ws://<alice-ip>:7717
+$ collagent join 7FK2P --name Bob --server ws://<alice-ip>:7717 --key <key from Alice's invite>
 
 ✓ Joined shared session 7FK2P
 
@@ -82,20 +84,21 @@ $ collagent join 7FK2P --name Bob --server ws://<alice-ip>:7717
 
 Both terminals now show the same live feed: who joined, every instruction, Claude Code's messages, each tool call and result, and turn completions. Either participant can send instructions; the agent sees who is speaking (`[Bob] Add OAuth callback validation.`). The agent's slash commands work from Bob's terminal too — `/model` or `/permissions` typed by any participant runs in the shared agent's UI just as if the host had typed it (see [In-session commands](#in-session-commands)).
 
-A minimal web page for joining/viewing (no dashboard) is served at `http://<server>:7717/?code=7FK2P`.
+The server also ships a web control plane: the **dashboard** at `http://<server>:7717/` (live rooms table, per-room activity timeline with an activity/audit split, agent & presence panels, room creation, controls through the real participant protocol, and analytics folded from real events — runs, durations, tokens/cost where reported), developer **docs** at `/docs`, and the lightweight **room viewer** for invite links at `/?code=7FK2P`. The dashboard observes through a WebSocket *watcher* role — it consumes the same canonical event/session frames as the CLI, never fake state, and never appears as a participant unless you explicitly join.
 
 ### Commands
 
 ```text
 collagent create            create a shared room and launch Claude Code
-collagent join <code>       join a room (replays the room's full history)
-collagent open <code>       reopen a stored room as host and re-attach Claude Code
+collagent join <code>       join a room (catch-up digest, then live; --key for remote servers)
+collagent open <code>       reopen a stored room as host and re-attach its agent
+collagent add <code>        add another agent to a room — the multi-agent opt-in
 collagent rooms             list all rooms — who's in them, last activity, where
 collagent agents            list the coding agents collagent supports (and what's installed)
-collagent status <code>     show one room's state + participants
+collagent status <code>     show one room's state + participants + agents
 collagent leave             leave the last room you joined
 collagent delete [code]     delete rooms — bare `delete` opens a checkbox picker, then confirms
-collagent serve             run a standalone session server
+collagent serve             run a standalone session server (loopback by default)
 ```
 
 `collagent rooms` (also bare `collagent`) shows every room — live rooms with people in them first — with the coding agent, who's there (and how many), the last instruction, the working directory, and recency:
@@ -132,37 +135,84 @@ It works even when the server is down (reads stored history from disk), and outd
 
 ### Rooms are stored
 
-Every room's event history is persisted to `~/.collagent/history/<code>.jsonl` and **rooms survive server restarts** — the server restores them from disk on boot. Joining a room replays its entire history (instructions, agent messages, tool activity, joins/leaves), so newcomers are fully caught up. Closing Claude Code leaves the room stored; `collagent open <code>` reopens it as host and re-attaches Claude Code — in native mode it passes `--resume <claude-session-id>` so the actual Claude Code conversation continues where it left off. A room only disappears when the host ends it explicitly with `/end`.
+Persistence is a repository layer with three backends: **PostgreSQL** (production source of truth, `DATABASE_URL`), **SQLite** (local default on Node ≥ 22.5), and plain JSON files (fallback). On the local backends every room also mirrors to `~/.collagent/history/<code>.jsonl`; on Postgres the database is authoritative and nothing depends on the client's filesystem. **Rooms survive server restarts** — rooms, agent sessions, participants, resume credentials, join keys, turns and every event restore on boot; in-memory history is capped (`COLLAGENT_EVENT_CACHE`) with older events served from the store. `collagent open <code>` reopens a room and re-attaches its agent — in native mode it passes the runtime's own resume flag so the actual conversation continues where it left off. A room only disappears when the host ends it explicitly with `/end` or deletes it.
 
-**When the host goes away, the live room closes for everyone.** The host's machine runs the agent, so a room without its host is dead air — on every supported runtime. When the host leaves (or their connection drops and doesn't come back within a short grace window), remaining participants see `■ room closed — host left` and are disconnected instead of typing instructions that can queue nowhere. The room stays stored: `collagent open <code>` revives it, and the first person to join a host-less room becomes its new host.
+**A room is persistent work, not a temporary agent process.** Agents can detach (host closes their terminal, process dies) and the room stays open: remaining participants keep chatting, instructions queue and are delivered when an agent re-attaches, and a room with no connected host is adoptable — the next joiner becomes host and receives the re-attach grants. Joining or reconnecting shows a **“SINCE YOU WERE AWAY”** digest (derived from the event stream) plus the tail of the feed instead of replaying thousands of raw events.
 
-`create` auto-starts a local session server if none is running. For cross-machine use, run `collagent serve` somewhere reachable and pass `--server ws://host:7717` to both `create` and `join`.
+`create` auto-starts a local session server if none is running. For cross-machine use, run `collagent serve --host 0.0.0.0` somewhere reachable and pass `--server ws://host:7717` to both `create` and `join` — remote joins then need the room's **join key**, which the host's invite line carries (`collagent join 7FK2P --key …`).
 
 ### In-session commands
 
 ```text
 /participants        who is here (presence, host/driver markers)
+/agents              the room's agents and their status
+/add <agent>         add another agent — the multi-agent opt-in (host/driver)
+/use <agent>         send your plain messages to that agent from now on
+/detach <agent>      detach an agent session (host/driver)
 /status              session state
-/pause               pause the shared agent        (host or driver)
+/pause               pause the shared agents       (host or driver)
 /resume              resume — queued instructions flush
-/handoff <name>      hand control to another participant
+/handoff <target>    hand control to a person, or focus to an agent
+                     (/handoff bob · /handoff @codex-1)
 /mode open|driver    open: anyone instructs; driver: only the driver
 /end                 end the session for everyone  (host)
 /quit                leave
+@<agent> <text>      address one agent in a multi-agent room
 ```
 
 Anything that isn't one of these room commands is sent to the shared agent — **including the agent's own slash commands**. A participant typing `/model`, `/permissions`, or `/compact` runs that command inside the shared agent's UI exactly as if the host had typed it, on every supported runtime (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Goose). Slash commands are delivered bare — no `[Bob]` speaker tag, which would demote them to prose — and the room feed still records who ran what. When collagent owns a name (like `/status`), `//status` force-sends it to the agent instead. Command access follows the same rules as instructions: everyone in open mode, driver/host in driver mode.
 
+### Multi-agent rooms (opt-in)
+
+A room starts with one agent and stays that way until someone with control says otherwise. `collagent add 7FK2P --agent codex` (its own terminal, native UI) or `/add codex` (inside a feed terminal, headless) attaches a second agent session; the same runtime can be added twice (`claude-1`, `claude-2`). Every agent keeps its **own private runtime context** — its native conversation, tools, filesystem state. What the room shares is coordination: each agent's prose, tool activity and results become attributed room events (`⏺ codex-1 …`), and humans steer with `@codex-1 …` one-shots, `/use claude-1` defaults, or `/handoff @codex-1` — which persists a structured handoff event (objective, recent direction, agent roster) and briefs the receiving agent. With several agents attached and no target, Collagent asks instead of guessing. Single-agent rooms never see any of this.
+
 ## Architecture
 
 ```text
-Claude Code ──┐
-Lovable ──────┤  (future)
-Cursor ───────┤  (future)
-Custom agent ─┘
-      │
-AgentAdapter  ── normalized events ──►  Collagent Core  ◄── WS ──  CLI / web participants
+                       Collagent Room (persistent)
+        humans ⇄ shared events (seq · roomId · agentId · turnId)
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+        AgentSession   AgentSession   AgentSession      (1 by default,
+         claude-1        codex-1       cursor-1          N by opt-in)
+              │              │              │
+        AgentAdapter   AgentAdapter   AgentAdapter   ── normalized events
+        (private native conversation, tools, runtime state — never merged)
 ```
+
+Room lifecycle (`active | archived | ended`) and agent state (`connecting | starting | working | waiting | paused | idle | completed | failed | disconnected`) are separate; the room's wire `status` is derived. Every agent-originated event carries `roomId`, `agentId`, `agentSessionId` and an explicit `turnId` (turns are bracketed by `turn_started` / `turn_completed` events, never inferred from timing), and `turn_completed` carries normalized usage (tokens/cost where the runtime exposes them, `null` where it doesn't).
+
+**Security defaults:** the server binds `127.0.0.1` unless `--host` says otherwise; remote clients register once (`POST /api/auth/register` → personal access token, stored hashed) and remote joins need the per-room join key, workspace membership, or a prior seat in the room; the HTTP admin API (list/delete) needs loopback or the token in `~/.collagent/admin-token`; join and HTTP requests are rate-limited per address; all remote text is stripped of terminal control bytes at the server edge (and again in the adapters) so ANSI/PTY escape injection dies before it reaches anyone's terminal.
+
+## Deployment
+
+Collagent deploys as a hosted backend, separate from the clients that connect to it:
+
+```text
+CLI / TUI · Web page            (clients — anywhere)
+        │ HTTPS / WSS
+        ▼
+Collagent backend               (one deployable service: auth/identity,
+  `collagent serve`              workspaces, rooms, agent sessions, realtime
+        │                        gateway, events/catch-up/usage APIs)
+        ▼
+PostgreSQL                      (source of truth: users, workspaces, rooms,
+                                 participants, agent sessions, events, turns)
+
+Agent hosts                     (separate processes, wherever the runtime
+  `collagent create/open/add`    lives: a developer's laptop for Claude Code/
+                                 Codex/Cursor…, a container for headless or
+                                 remote agents — they connect to the backend
+                                 as authenticated agent hosts over WSS)
+```
+
+- **`docker compose up`** starts the backend + Postgres with hosted-mode security (`.env.example` documents every variable). TLS terminates at your proxy (set `COLLAGENT_TRUST_PROXY=1`) or natively via `COLLAGENT_TLS_CERT`/`COLLAGENT_TLS_KEY`.
+- **Operations:** file-based SQL migrations run at boot (`migrations/`, tracked in `schema_migrations`); `/healthz` (liveness) and `/readyz` (checks the database); structured JSON logs (`COLLAGENT_LOG_FORMAT=json`); graceful shutdown on SIGTERM (clients notified, writes flushed, pool released); connection pooling; WebSocket heartbeats plus cursor-based (`sinceSeq`) reconnect/resume; CORS via `COLLAGENT_CORS_ORIGINS`.
+- **Clients:** the CLI registers automatically on first contact with a remote server and stores its token in `~/.collagent/credentials.json` (0600). The room lives on the backend — it stays alive when any human client, including the creator's laptop, disconnects; agents re-attach and resume where the runtime supports it.
+- **Local development:** `collagent dev` — one command, loopback, SQLite, no auth. `collagent dev --pg <url>` points it at a local Postgres. Production architecture and local simplicity are the same codepath with different switches.
+
+**HTTP API** (loopback, admin token, user token, or `?key=` per route): `POST /api/auth/register` · `GET /api/auth/whoami` · `GET /api/sessions` (scoped to the caller's workspaces/rooms) · `GET /api/sessions/:code` · `/agents` · `/events?since&limit&kind&agentId&turnId&participantId&afterTs` · `/catchup?since` · `/usage` · `DELETE /api/sessions/:code`.
 
 Three layers, deliberately separated:
 

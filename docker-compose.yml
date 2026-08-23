@@ -1,0 +1,40 @@
+# Production-shaped local deployment: the Collagent backend + PostgreSQL.
+# TLS terminates at your proxy (Caddy/nginx/ALB) in front of `app`, which is
+# why COLLAGENT_TRUST_PROXY is on. Secrets come from the environment / .env.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "7717:7717"
+    environment:
+      DATABASE_URL: postgres://collagent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/collagent
+      COLLAGENT_REQUIRE_AUTH: "1"
+      COLLAGENT_REQUIRE_JOIN_KEY: "1"
+      COLLAGENT_TRUST_PROXY: "1"
+      COLLAGENT_LOG_FORMAT: json
+      COLLAGENT_CORS_ORIGINS: ${COLLAGENT_CORS_ORIGINS:-}
+    volumes:
+      - collagent-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: collagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: collagent
+    volumes:
+      - collagent-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collagent -d collagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  collagent-data:
+  collagent-db:

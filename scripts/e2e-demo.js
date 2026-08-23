@@ -138,7 +138,7 @@ ok(`paused session rejected Bob's instruction ("${denyMsg}")`);
 alice.control('resume');
 await waitFor(bob, (e) => e.kind === 'session_resumed', 5_000, 'resume');
 alice.control('handoff', { target: 'Bob' });
-const handoff = await waitFor(bob, (e) => e.kind === 'control_transferred', 5_000, 'handoff');
+const handoff = await waitFor(bob, (e) => e.kind === 'handoff_completed', 5_000, 'handoff');
 ok(`control handed to ${handoff.data.to.name}`);
 
 step('shutting down');
