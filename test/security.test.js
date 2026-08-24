@@ -162,3 +162,64 @@ test('invalid resume credentials and invalid agent tokens are rejected', async (
   thief.close();
   alice.close();
 });
+
+test('join keys are required on loopback too — drive-by pages can reach 127.0.0.1', async (t) => {
+  const server = createCollagentServer({ dataDir: null }); // defaults, loopback trusted
+  const addr = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  const serverUrl = `ws://127.0.0.1:${addr.port}`;
+
+  const alice = new CollagentClient({ serverUrl, name: 'Alice' });
+  await alice.connect();
+  const created = await alice.createSession({ agentType: 'mock' });
+
+  const bob = new CollagentClient({ serverUrl, name: 'Bob' });
+  await bob.connect();
+  await assert.rejects(() => bob.join(created.session.code), /join key/);
+  const welcome = await bob.join(created.session.code, { key: created.joinKey });
+  assert.equal(welcome.session.code, created.session.code);
+
+  const room = await (await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${created.session.code}`)).json();
+  assert.equal(room.joinKey, created.joinKey);
+});
+
+test('websocket upgrades from foreign browser origins are rejected', async (t) => {
+  const server = createCollagentServer({ dataDir: null });
+  const addr = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  const url = `ws://127.0.0.1:${addr.port}/ws`;
+
+  const { default: WebSocket } = await import('ws');
+  const closedWith = (origin) => new Promise((resolve) => {
+    const ws = new WebSocket(url, origin ? { headers: { origin } } : {});
+    ws.on('close', (code) => resolve(code));
+    ws.on('open', () => setTimeout(() => { ws.close(); }, 400));
+  });
+
+  assert.equal(await closedWith('https://evil.example'), 1008, 'foreign origin refused');
+  assert.notEqual(await closedWith('http://localhost:7717'), 1008, 'own pages allowed');
+  assert.notEqual(await closedWith(null), 1008, 'native clients (no Origin) allowed');
+});
+
+test('local secrets are encrypted at rest with a master key', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collagent-secrets-'));
+  process.env.COLLAGENT_DATA_DIR = dir;
+  process.env.COLLAGENT_MASTER_KEY = '11'.repeat(32);
+  t.after(() => {
+    delete process.env.COLLAGENT_DATA_DIR;
+    delete process.env.COLLAGENT_MASTER_KEY;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const { readSecretJson, writeSecretJson } = await import('../src/cli/secret-store.js');
+
+  const file = path.join(dir, 'rooms.json');
+  fs.writeFileSync(file, JSON.stringify({ A7K2P: { key: 'legacy-key' } }));
+  assert.equal(readSecretJson(file).A7K2P.key, 'legacy-key');
+
+  writeSecretJson(file, { A7K2P: { key: 'secret-key-123' } });
+  assert.ok(!fs.existsSync(file), 'plaintext removed after migration');
+  const onDisk = fs.readFileSync(`${file}.enc`, 'utf8');
+  assert.ok(!onDisk.includes('secret-key-123'), 'key is not readable on disk');
+  assert.equal(JSON.parse(onDisk).alg, 'aes-256-gcm');
+  assert.equal(readSecretJson(file).A7K2P.key, 'secret-key-123');
+});

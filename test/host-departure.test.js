@@ -21,7 +21,7 @@ async function boot(t) {
 
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key: created.joinKey });
 
   return { server, serverUrl, alice, bob, code, created };
 }
@@ -52,7 +52,7 @@ function waitForEvent(client, predicate, timeoutMs = 4000) {
 }
 
 test('the room persists when its host leaves — remaining participants stay in', async (t) => {
-  const { server, alice, bob, code } = await boot(t);
+  const { created, server, alice, bob, code } = await boot(t);
   seen(bob);
 
   alice.leave();
@@ -117,7 +117,7 @@ test('instructions sent while no agent is attached queue and flush on attach', a
 });
 
 test('a hostless room is adoptable: the next joiner becomes host and can re-attach', async (t) => {
-  const { server, serverUrl, alice, bob, code } = await boot(t);
+  const { created, server, serverUrl, alice, bob, code } = await boot(t);
 
   alice.leave();
   alice.close();
@@ -125,7 +125,7 @@ test('a hostless room is adoptable: the next joiner becomes host and can re-atta
 
   const carol = new CollagentClient({ serverUrl, name: 'Carol' });
   await carol.connect();
-  const welcome = await carol.join(code);
+  const welcome = await carol.join(code, { key: created.joinKey });
   assert.equal(welcome.session.participants.find((p) => p.name === 'Carol')?.role, 'host');
   assert.ok(welcome.agentToken, 'the adopting host receives a re-attach grant');
   seen(carol); // start recording before the attach broadcasts

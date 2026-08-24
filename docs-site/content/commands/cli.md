@@ -23,7 +23,17 @@ Join a room by code. Catch-up first, then live.
 collagent join A7K2 --name Bob
 ```
 
-Options: `--name` · `--key <join key>` (remote servers) · `--server <url>`.
+Options: `--name` · `--key <join key>` · `--server <url>`. Every room has a join key; your machine auto-fills keys for rooms it already knows or hosts locally.
+
+## collagent invite
+
+Reprint a room's full invite — the join command with its key, and the browser link. Useful after an agent's own UI (Codex, Cursor, …) clears the terminal and takes the banner with it.
+
+```
+collagent invite A7K2
+```
+
+The key is only revealed on machines the server trusts with it: the host's machine, or the server admin.
 
 ## collagent open
 

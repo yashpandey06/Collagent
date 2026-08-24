@@ -83,11 +83,18 @@ $('name').onkeydown = (e) => e.key === 'Enter' && join();
 $('sendBtn').onclick = send;
 $('text').onkeydown = (e) => e.key === 'Enter' && send();
 
-function join() {
+async function join() {
   const code = $('code').value.trim().toUpperCase();
   const name = $('name').value.trim() || 'web-viewer';
-  const key = params.get('key');
+  let key = params.get('key');
   if (!code) return;
+
+  if (!key) {
+    try {
+      const res = await fetch('/api/sessions/' + code);
+      if (res.ok) key = (await res.json()).joinKey ?? null;
+    } catch {}
+  }
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => ws.send(JSON.stringify({ type: 'join', code, name, key }));
   ws.onmessage = (m) => handle(JSON.parse(m.data));

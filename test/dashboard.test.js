@@ -157,7 +157,7 @@ test('overview and analytics endpoints fold real state', async (t) => {
   assert.equal(overview.agents.byRuntime.mock, 1);
   assert.equal(overview.people.online, 1);
   assert.equal(overview.usage.turns, 1);
-  assert.ok(overview.recent.some((e) => e.kind === 'instruction' && e.roomCode === created.session.code));
+  assert.ok(overview.recent.some((e) => e.kind === 'agent_session_attached' && e.roomCode === created.session.code));
 
   const analytics = await (await fetch(`${base}/api/analytics?sinceHours=1`)).json();
   assert.equal(analytics.totals.runs, 1);
@@ -205,4 +205,58 @@ test('the dashboard docs link honors COLLAGENT_DOCS_URL', async (t) => {
   const { base } = await boot(t);
   const dash = await (await fetch(`${base}/`)).text();
   assert.match(dash, /href="https:\/\/docs\.example\.test\/" target="_blank"/);
+});
+
+test('overview recent activity is lifecycle-only — never conversation content', async (t) => {
+  const server = createCollagentServer({ dataDir: null });
+  const addr = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  const serverUrl = `ws://127.0.0.1:${addr.port}`;
+
+  const alice = new CollagentClient({ serverUrl, name: 'Alice' });
+  await alice.connect();
+  const created = await alice.createSession({ agentType: 'mock' });
+  const host = new AgentHost({
+    serverUrl, code: created.session.code, agentToken: alice.agentToken, adapter: new MockAdapter({ delay: 2 }),
+  });
+  await host.start();
+  alice.sendInstruction('secret business logic — must not appear in the overview');
+  await new Promise((r) => setTimeout(r, 200));
+
+  const ov = await (await fetch(`http://127.0.0.1:${addr.port}/api/overview`)).json();
+  const kinds = new Set(ov.recent.map((e) => e.kind));
+  assert.ok(kinds.has('session_created'));
+  assert.ok(kinds.has('agent_session_attached'));
+  for (const chatty of ['instruction', 'agent_message', 'tool_use', 'tool_result', 'local_prompt']) {
+    assert.ok(!kinds.has(chatty), `${chatty} leaked into the overview feed`);
+  }
+  assert.ok(!JSON.stringify(ov.recent).includes('secret business logic'), 'no message text in the overview');
+  await host.stop();
+  alice.close();
+});
+
+test('dashboard-style create takes no seat: no phantom join, room adoptable from a terminal', async (t) => {
+  const server = createCollagentServer({ dataDir: null });
+  const addr = await server.listen(0, '127.0.0.1');
+  t.after(() => server.close());
+  const serverUrl = `ws://127.0.0.1:${addr.port}`;
+
+  const dash = watcher(serverUrl);
+  await dash.opened;
+  dash.send({ type: 'create_session', seat: false, agentType: 'claude-native' });
+  const created = await dash.wait('session_created');
+  assert.ok(created.joinKey);
+  assert.equal(created.self, undefined);
+  assert.equal(created.session.participants.length, 0, 'nobody joined');
+
+  const room = server.manager.get(created.session.code);
+  assert.equal(room.log.events.filter((e) => e.kind === 'participant_joined').length, 0);
+
+  const host = new CollagentClient({ serverUrl, name: 'Yash' });
+  await host.connect();
+  const welcome = await host.join(created.session.code, { key: created.joinKey });
+  assert.equal(welcome.session.participants[0].role, 'host', 'first terminal joiner becomes the host');
+  assert.ok(welcome.agentToken, 'terminal host can attach the agent');
+  host.close();
+  dash.close();
 });

@@ -62,7 +62,7 @@ async function addAgent(t, client, serverUrl, code, agentType = 'mock') {
 }
 
 test('single-agent room stays simple: plain instructions route with no addressing', async (t) => {
-  const { alice } = await boot(t);
+  const { created, alice } = await boot(t);
   seen(alice);
   alice.sendInstruction('fix the bug');
   const result = await waitForEvent(alice, (e) => e.kind === 'result');
@@ -72,7 +72,7 @@ test('single-agent room stays simple: plain instructions route with no addressin
 });
 
 test('add agent: same runtime twice gets stable distinct ids; host permission enforced', async (t) => {
-  const { server, serverUrl, alice, code } = await boot(t);
+  const { created, server, serverUrl, alice, code } = await boot(t);
   seen(alice);
 
   const { added } = await addAgent(t, alice, serverUrl, code);
@@ -87,14 +87,14 @@ test('add agent: same runtime twice gets stable distinct ids; host permission en
   // A collaborator (not host, not driver) may not add agents.
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key: created.joinKey });
   await assert.rejects(() => bob.addAgent('mock'), /permission/);
   bob.close();
   alice.close();
 });
 
 test('addressed instructions: @agent routes, default agent works, ambiguity is explicit', async (t) => {
-  const { serverUrl, alice, code, adapter1 } = await boot(t);
+  const { created, serverUrl, alice, code, adapter1 } = await boot(t);
   seen(alice);
   const received1 = [];
   const originalSend1 = adapter1.sendInstruction.bind(adapter1);
@@ -131,7 +131,7 @@ test('addressed instructions: @agent routes, default agent works, ambiguity is e
 });
 
 test('turns are first-class: explicit ids bracket each execution and stamp its events', async (t) => {
-  const { alice } = await boot(t);
+  const { created, alice } = await boot(t);
   seen(alice);
   alice.sendInstruction('do the thing');
   const completed = await waitForEvent(alice, (e) => e.kind === 'turn_completed');
@@ -153,7 +153,7 @@ test('turns are first-class: explicit ids bracket each execution and stamp its e
 });
 
 test('cross-agent conference: shared room events, private contexts, concurrent work', async (t) => {
-  const { serverUrl, alice, code } = await boot(t);
+  const { created, serverUrl, alice, code } = await boot(t);
   seen(alice);
   await addAgent(t, alice, serverUrl, code);
 
@@ -176,7 +176,7 @@ test('cross-agent conference: shared room events, private contexts, concurrent w
 });
 
 test('room survives one agent detaching while the other keeps working', async (t) => {
-  const { server, serverUrl, alice, code } = await boot(t);
+  const { created, server, serverUrl, alice, code } = await boot(t);
   seen(alice);
   const { host } = await addAgent(t, alice, serverUrl, code);
 
@@ -195,7 +195,7 @@ test('room survives one agent detaching while the other keeps working', async (t
 });
 
 test('handoff to an agent persists structured context and briefs the agent', async (t) => {
-  const { serverUrl, alice, code, adapter1 } = await boot(t);
+  const { created, serverUrl, alice, code, adapter1 } = await boot(t);
   seen(alice);
   const received1 = [];
   const originalSend = adapter1.sendInstruction.bind(adapter1);
@@ -219,7 +219,7 @@ test('handoff to an agent persists structured context and briefs the agent', asy
   // After handoff the room's focus is mock-1: plain sends from anyone route there.
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key: created.joinKey });
   seen(bob);
   bob.sendInstruction('carry on');
   const result = await waitForEvent(bob, (e) => e.kind === 'result' && /carry on/.test(e.data.text ?? ''));

@@ -36,7 +36,7 @@ async function bootSession(t) {
     await server.close();
   });
 
-  return { server, serverUrl, alice, host, adapter, code: created.session.code };
+  return { server, serverUrl, alice, host, adapter, code: created.session.code, key: created.joinKey };
 }
 
 /**
@@ -64,13 +64,13 @@ function waitForEvent(client, predicate, timeoutMs = 4000) {
 }
 
 test('milestone flow: create → join → instruct → agent executes → both see results', async (t) => {
-  const { serverUrl, alice, code } = await bootSession(t);
+  const { serverUrl, alice, code, key } = await bootSession(t);
   const aliceEvents = collect(alice);
 
   // Bob joins from "his machine"
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  const welcome = await bob.join(code);
+  const welcome = await bob.join(code, { key });
   const bobEvents = collect(bob);
 
   assert.equal(welcome.session.code, code);
@@ -108,10 +108,10 @@ test('milestone flow: create → join → instruct → agent executes → both s
 });
 
 test('pause blocks instructions; resume flushes the queue', async (t) => {
-  const { serverUrl, alice, code } = await bootSession(t);
+  const { serverUrl, alice, code, key } = await bootSession(t);
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key });
 
   // agent ready arrives during boot; recorded by collect() in bootSession
   await waitForEvent(alice, (e) => e.kind === 'agent_status' && e.data.status === 'ready');
@@ -135,10 +135,10 @@ test('pause blocks instructions; resume flushes the queue', async (t) => {
 });
 
 test('driver mode + handoff controls who can instruct', async (t) => {
-  const { serverUrl, alice, code } = await bootSession(t);
+  const { serverUrl, alice, code, key } = await bootSession(t);
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key });
 
   alice.control('set_mode', { mode: 'driver' });
   await waitForEvent(bob, (e) => e.kind === 'mode_changed');
@@ -167,10 +167,10 @@ test('driver mode + handoff controls who can instruct', async (t) => {
 });
 
 test('reconnect resumes identity and replays missed events', async (t) => {
-  const { serverUrl, alice, code } = await bootSession(t);
+  const { serverUrl, alice, code, key } = await bootSession(t);
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  await bob.join(code);
+  await bob.join(code, { key });
   const bobId = bob.self.participantId;
 
   // Simulate a dropped connection (not a deliberate leave)
@@ -197,7 +197,7 @@ test('reconnect resumes identity and replays missed events', async (t) => {
 });
 
 test('status endpoint exposes public session info', async (t) => {
-  const { serverUrl, alice, code } = await bootSession(t);
+  const { serverUrl, alice, code, key } = await bootSession(t);
   const port = new URL(serverUrl.replace('ws://', 'http://')).port;
   const res = await fetch(`http://127.0.0.1:${port}/api/sessions/${code}`);
   assert.equal(res.status, 200);

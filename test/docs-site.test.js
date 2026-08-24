@@ -9,7 +9,7 @@ const CONTENT = path.join(process.cwd(), 'docs-site', 'content');
 // Ground truth: the CLI dispatcher and the room-command set.
 const CLI_COMMANDS = new Set([
   'serve', 'dev', 'create', 'open', 'add', 'agents', 'agent', 'rooms', 'room', 'ls',
-  'join', 'status', 'leave', 'delete', 'rm', 'help',
+  'join', 'invite', 'status', 'leave', 'delete', 'rm', 'help',
 ]);
 const ROOM_COMMANDS_FILE = fs.readFileSync('src/ui/tui.js', 'utf8');
 
@@ -39,7 +39,7 @@ test('every page in the nav exists, renders, and every docs command is real', ()
 
 test('every CLI command is documented in the reference', () => {
   const ref = fs.readFileSync(path.join(CONTENT, 'commands', 'cli.md'), 'utf8');
-  for (const cmd of ['create', 'join', 'open', 'add', 'rooms', 'agents', 'status', 'leave', 'delete', 'serve', 'dev']) {
+  for (const cmd of ['create', 'join', 'invite', 'open', 'add', 'rooms', 'agents', 'status', 'leave', 'delete', 'serve', 'dev']) {
     assert.ok(ref.includes(`collagent ${cmd}`), `CLI reference is missing "collagent ${cmd}"`);
   }
 });

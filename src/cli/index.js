@@ -17,6 +17,7 @@ import { buildRoomSummary } from '../core/room-summary.js';
 import { catchupSummary, currentActivity } from '../core/catchup.js';
 import { defaultDataDir } from '../core/session-manager.js';
 import { loadRoomState, saveRoomState } from './room-store.js';
+import { readSecretJson, writeSecretJson } from './secret-store.js';
 import { uuid } from '../core/ids.js';
 import { VERSION } from '../version.js';
 
@@ -36,6 +37,7 @@ function printHelp() {
     ['join <code>', 'join a room — catch-up first, then live'],
     ['open <code>', 'reopen a saved room as host, agent resumes'],
     ['add <code>', 'add another agent to a room (multi-agent)'],
+    ['invite [code]', 'reprint a room\'s join command + key'],
     ['rooms', "list your rooms — topics, people, recency"],
     ['agents', 'the coding agents collagent supports'],
     ['status <code>', "one room's state and participants"],
@@ -79,6 +81,7 @@ export async function run(argv) {
     case 'room':
     case 'ls': return cmdRooms(opts);
     case 'join': return cmdJoin(opts);
+    case 'invite': return cmdInvite(opts);
     case 'status': return cmdStatus(opts);
     case 'leave': return cmdLeave(opts);
     case 'delete':
@@ -134,13 +137,12 @@ function identity() {
 }
 
 // Remote servers require a registered user; first contact registers one and
-// stores the token per server origin (0600). Loopback servers skip auth.
+// stores the token per server origin, encrypted. Loopback servers skip auth.
 async function ensureAuth(serverUrl, name) {
   if (isLocalHost(serverUrl)) return null;
   const origin = httpUrl(serverUrl);
   const file = path.join(defaultDataDir(), 'credentials.json');
-  let all = {};
-  try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first use */ }
+  const all = readSecretJson(file) ?? {};
   if (all[origin]?.token) return all[origin];
   try {
     const res = await fetch(`${origin}/api/auth/register`, {
@@ -152,8 +154,7 @@ async function ensureAuth(serverUrl, name) {
     if (!res.ok) return null; // server predates auth, or registration is closed
     const account = await res.json();
     all[origin] = { userId: account.userId, token: account.token, name: account.name };
-    fs.mkdirSync(defaultDataDir(), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(all), { mode: 0o600 });
+    writeSecretJson(file, all);
     console.log(paint.dim(`  registered on ${origin} as ${account.name}`));
     return all[origin];
   } catch {
@@ -282,7 +283,7 @@ async function cmdCreate(opts) {
   const client = await connectClient(serverUrl, name);
   const created = await client.createSession({ agentType: adapterType });
   const code = created.session.code;
-  saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey });
+  saveState({ serverUrl, code, self: client.self, name });
   saveRoomState(code, {
     participantId: client.self.participantId,
     resumeToken: client.self.resumeToken,
@@ -307,12 +308,13 @@ async function cmdOpen(opts) {
 
   const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
-  const welcome = await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
-  saveState({ serverUrl, code, self: client.self, name, joinKey: client.joinKey ?? stored?.key });
+  const welcome = await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null, serverUrl });
+  saveState({ serverUrl, code, self: client.self, name });
   saveRoomState(code, {
     participantId: client.self.participantId,
     resumeToken: client.self.resumeToken,
     name: client.name,
+    ...(client.joinKey ? { key: client.joinKey } : {}),
   });
 
   if (!client.agentToken) {
@@ -368,7 +370,7 @@ async function cmdAdd(opts) {
   const serverUrl = defaultServer(opts);
   const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
-  await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null });
+  await rejoinOrJoin(client, code, { stored, key: opts.key ?? stored?.key ?? null, serverUrl });
   saveRoomState(code, {
     participantId: client.self.participantId,
     resumeToken: client.self.resumeToken,
@@ -498,6 +500,7 @@ async function cmdRooms(opts) {
   printCommandBar([
     ['collagent create', 'start a new room'],
     ['collagent join <code>', 'jump into a room'],
+    ['collagent invite <code>', 'reprint the join command + key'],
     ['collagent open <code>', 'reopen a room as host'],
     ['collagent delete <code>', 'remove a room + its history'],
   ]);
@@ -591,15 +594,15 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
   const label = runtimeLabel(adapterType);
   const mark = runtimeGlyph(adapterType);
   const remote = isRemoteable(serverUrl);
-  const key = client.joinKey ?? loadState()?.joinKey ?? null;
+  const key = client.joinKey ?? loadRoomState(code)?.key ?? null;
   const banner = () => {
     console.log('');
     // The chip keeps the brand on the line people screenshot and share.
     console.log(`  ${paint.chip('collagent')} ${paint.green('✓')} ${paint.bold(`Room ${verb}`)}  ${paint.bold(code)} ${paint.dim('·')} ${mark ? `${mark} ` : ''}${label}`);
     console.log('');
-    const invite = `collagent join ${code}${remote && key ? ` --key ${key}` : ''}`;
+    const invite = `collagent join ${code}${key ? ` --key ${key}` : ''}`;
     console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(invite)}${remote ? ` ${paint.dim(`--server ${serverUrl}`)}` : ''}`);
-    console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code) + (remote && key ? `&key=${key}` : ''))}`);
+    console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(webUrl(serverUrl, code) + (key ? `&key=${key}` : ''))}`);
     console.log(`    ${paint.dim('Add a 2nd agent')}    ${paint.dim(`collagent add ${code} --agent <id>   (or /add in a feed terminal)`)}`);
     if (resumeId) {
       console.log(`    ${paint.dim('Resuming')}           ${paint.dim(`${label} conversation ${resumeId.slice(0, 8)}… continues where it left off`)}`);
@@ -630,7 +633,7 @@ async function hostRoom({ client, code, serverUrl, opts, adapterType, verb, resu
     if (descriptor.runtime === 'claude') {
       console.log(paint.dim('  Your room code and who\'s here stay visible in its status line.'));
     } else {
-      console.log(paint.dim('  See who\'s here anytime with: collagent rooms'));
+      console.log(paint.dim(`  ${label} clears this screen — get the invite back anytime: `) + paint.bold(`collagent invite ${code}`));
     }
     console.log('');
     await host.start(); // the PTY takes over this terminal; onExit handles shutdown
@@ -704,19 +707,19 @@ async function cmdJoin(opts) {
   const client = await connectClient(serverUrl, name);
   const stored = loadRoomState(code);
   const key = opts.key ?? stored?.key ?? null;
-  const welcome = await rejoinOrJoin(client, code, { stored, key });
+  const welcome = await rejoinOrJoin(client, code, { stored, key, serverUrl });
   saveState({ serverUrl, code, self: client.self, name });
   saveRoomState(code, {
     participantId: client.self.participantId,
     resumeToken: client.self.resumeToken,
     name: client.name,
-    ...(key ? { key } : {}),
+    ...(client.joinKey ?? key ? { key: client.joinKey ?? key } : {}),
   });
   enterRoomFeed({ client, welcome, name, code, serverUrl, lastSeenSeq: stored?.lastSeenSeq ?? 0 });
 }
 
 // Returning users keep their seat (and read position); first-timers join.
-async function rejoinOrJoin(client, code, { stored, key }) {
+async function rejoinOrJoin(client, code, { stored, key, serverUrl = null }) {
   if (stored?.participantId && stored?.resumeToken) {
     try {
       client._send({
@@ -729,7 +732,25 @@ async function rejoinOrJoin(client, code, { stored, key }) {
       return await client._await('reconnected');
     } catch { /* seat gone (room restarted, participant removed) — join fresh */ }
   }
-  return client.join(code, { key });
+  try {
+    return await client.join(code, { key });
+  } catch (err) {
+    if (!/join key/i.test(err.message) || !serverUrl || !isLocalHost(serverUrl)) throw err;
+    const fetched = await fetchJoinKey(code, serverUrl);
+    if (!fetched) throw err;
+    const welcome = await client.join(code, { key: fetched });
+    saveRoomState(code, { key: fetched });
+    return welcome;
+  }
+}
+
+async function fetchJoinKey(code, serverUrl) {
+  try {
+    const res = await fetch(`${httpUrl(serverUrl)}/api/sessions/${code}`, { signal: AbortSignal.timeout(2000) });
+    return res.ok ? (await res.json()).joinKey ?? null : null;
+  } catch {
+    return null;
+  }
 }
 
 // Status churn, title changes and turn/session structure are metadata, not
@@ -818,6 +839,40 @@ function enterRoomFeed({ client, welcome, name, code, serverUrl, lastSeenSeq = 0
   });
 }
 
+async function roomInvite(code, serverUrl) {
+  const key = loadRoomState(code)?.key ?? await fetchJoinKey(code, serverUrl);
+  const remote = isRemoteable(serverUrl);
+  return {
+    key,
+    invite: `collagent join ${code}${key ? ` --key ${key}` : ''}${remote ? ` --server ${serverUrl}` : ''}`,
+    web: webUrl(serverUrl, code) + (key ? `&key=${key}` : ''),
+  };
+}
+
+async function cmdInvite(opts) {
+  const code = (opts._[0] ?? loadState()?.code ?? '').toUpperCase();
+  if (!code) {
+    console.error('usage: collagent invite <code>');
+    process.exitCode = 1;
+    return;
+  }
+  const serverUrl = defaultServer(opts);
+  const room = await findRoom(code, serverUrl, Boolean(await serverHealth(serverUrl)));
+  if (!room) {
+    console.error(`No room ${code}.`);
+    process.exitCode = 1;
+    return;
+  }
+  const { key, invite, web } = await roomInvite(code, serverUrl);
+  console.log('');
+  console.log(`  ${paint.chip('collagent')} ${paint.bold(`Room ${code}`)} ${paint.dim('·')} ${runtimeLabel(room.agentType)}${room.title ? ` ${paint.dim('·')} ${room.title}` : ''}`);
+  console.log('');
+  console.log(`    ${paint.dim('Invite your team')}   ${paint.bold(invite)}`);
+  console.log(`    ${paint.dim('Watch in browser')}   ${paint.dim(web)}`);
+  if (!key) console.log(paint.yellow('    no key available here — only the host\'s machine (or the server\'s dashboard) holds it'));
+  console.log('');
+}
+
 async function cmdStatus(opts) {
   const code = (opts._[0] ?? loadState()?.code ?? '').toUpperCase();
   if (!code) {
@@ -837,7 +892,8 @@ async function cmdStatus(opts) {
   console.log(renderRoomList(withAgentLabels([s]), { homedir: os.homedir(), header: false }));
   console.log(renderPresence(s, null, { agentLabel: runtimeLabel(s.agentType) }));
   if ((s.agents?.length ?? 0) > 1) console.log(renderAgents(s, { agentLabel: runtimeLabel(s.agentType) }));
-  console.log(paint.dim(`  ${s.mode} mode · created ${ago(s.createdAt)} · invite: collagent join ${s.code}`));
+  const { invite } = await roomInvite(code, defaultServer(opts));
+  console.log(paint.dim(`  ${s.mode} mode · created ${ago(s.createdAt)} · invite: `) + paint.bold(invite));
   console.log('');
 }
 
@@ -1016,12 +1072,26 @@ const isLocalHost = (serverUrl) =>
 
 // Auto-start a local server, and auto-restart an outdated one — rooms
 // restore from disk on boot, so a restart loses nothing.
+const cmpVersion = (a, b) => {
+  const pa = String(a ?? '0').split('.').map(Number);
+  const pb = String(b ?? '0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
+};
+
 async function ensureServer(serverUrl) {
   const health = await serverHealth(serverUrl);
   if (health?.version === VERSION) return;
 
   if (health && !isLocalHost(serverUrl)) {
     console.log(paint.yellow(`warning: server ${serverUrl} runs v${health.version ?? '<0.1.0'}, CLI is v${VERSION}`));
+    return;
+  }
+  if (health && cmpVersion(health.version, VERSION) > 0) {
+    console.log(paint.yellow(`this collagent CLI (v${VERSION}) is older than the running server (v${health.version}) — update it: cd <collagent repo> && git pull, or npm update -g collagent`));
     return;
   }
   if (health && isLocalHost(serverUrl)) {

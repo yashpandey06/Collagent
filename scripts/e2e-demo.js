@@ -85,7 +85,7 @@ await host.start();
 step('Bob joins from a second connection');
 const bob = new CollagentClient({ serverUrl, name: 'Bob' });
 await bob.connect();
-const welcome = await bob.join(code);
+const welcome = await bob.join(code, { key: created.joinKey });
 // Bob's view = replayed history (everything before he joined) + live events.
 seen(bob).push(...welcome.events);
 ok(`Bob joined; sees participants: ${welcome.session.participants.map((p) => p.name).join(', ')}`);

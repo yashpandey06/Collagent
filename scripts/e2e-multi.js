@@ -67,7 +67,7 @@ ok(`room ${code} created · agent ${host1.agentId} attached`);
 
 const bob = new CollagentClient({ serverUrl, name: 'Bob' });
 await bob.connect();
-await bob.join(code);
+await bob.join(code, { key: created.joinKey });
 seen(alice); seen(bob);
 bob.sendInstruction('Add OAuth callback validation.');
 const aResult = await waitFor(bob, (e) => e.kind === 'result', 4000, 'result');

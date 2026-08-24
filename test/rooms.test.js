@@ -64,7 +64,7 @@ test('first joiner of a restored room becomes host and can re-attach an agent', 
 
   const bob = new CollagentClient({ serverUrl, name: 'Bob' });
   await bob.connect();
-  const welcome = await bob.join(code);
+  const welcome = await bob.join(code, { key: created.joinKey });
 
   assert.ok(welcome.agentToken, 'reopening host receives agent credentials');
   assert.equal(bob.session.participants.find((p) => p.name === 'Bob').role, 'host');
@@ -86,7 +86,7 @@ test('first joiner of a restored room becomes host and can re-attach an agent', 
 
   const carol = new CollagentClient({ serverUrl, name: 'Carol' });
   await carol.connect();
-  const carolWelcome = await carol.join(code);
+  const carolWelcome = await carol.join(code, { key: created.joinKey });
   assert.equal(carolWelcome.agentToken, undefined, 'collaborators get no agent credentials');
   assert.equal(carol.session.participants.find((p) => p.name === 'Carol').role, 'collaborator');
 

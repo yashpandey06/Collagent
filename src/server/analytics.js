@@ -3,6 +3,14 @@
  * no underlying data reports zero/null rather than being invented.
  */
 
+export const OVERVIEW_KINDS = new Set([
+  'session_created', 'session_ended', 'room_archived',
+  'participant_joined', 'participant_left',
+  'agent_session_created', 'agent_session_attached', 'agent_session_detached',
+  'handoff_completed', 'mode_changed', 'session_paused', 'session_resumed',
+  'turn_failed', 'error',
+]);
+
 /** Cross-room overview: what is happening right now. */
 export function buildOverview(sessions, { recentLimit = 20 } = {}) {
   const overview = {
@@ -29,7 +37,7 @@ export function buildOverview(sessions, { recentLimit = 20 } = {}) {
       if (agent.attached && agent.status === 'working') overview.agents.working++;
     }
 
-    for (const e of session.log.events.slice(-recentLimit)) {
+    for (const e of session.log.events.filter((x) => OVERVIEW_KINDS.has(x.kind)).slice(-recentLimit)) {
       recent.push({ ...e, roomCode: session.code });
     }
     foldUsage(overview.usage, session.log.events);

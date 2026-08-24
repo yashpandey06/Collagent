@@ -91,6 +91,7 @@
   button.act.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:600; }
   button.act.primary:hover:not(:disabled) { filter:brightness(1.08); }
   button.act:disabled { opacity:.38; cursor:default; }
+  button.act:active:not(:disabled) { transform: translateY(1px); }
   input.field, select.field { font-family:var(--mono); font-size:13px; color:var(--ink);
     background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:7px 10px; }
   input.field:focus-visible, select.field:focus-visible, button:focus-visible, a:focus-visible, tr:focus-visible {
@@ -255,11 +256,9 @@
         <span id="r-topic" class="faint"></span>
       </div>
       <div style="display:flex; gap:8px; align-items:center">
+        <button class="act" id="r-key" style="display:none" title="click to reveal + copy">key ••••••</button>
         <button class="act" id="r-invite">copy invite</button>
-        <button class="act" id="r-join">join</button>
-        <button class="act" id="r-pause" disabled>pause</button>
-        <button class="act" id="r-archive" disabled>archive</button>
-        <button class="act" id="r-end" disabled>end</button>
+        <button class="act" id="r-delete" title="end the room and erase its history">delete</button>
       </div>
     </div>
     <div class="row">
@@ -283,9 +282,6 @@
         </div>
         <div id="r-catchup"></div>
         <div id="r-timeline" class="timeline"></div>
-        <div id="r-instruct" class="mt" style="display:none">
-          <input class="field" id="r-input" style="width:100%" placeholder="instruct the agent — @agent-id to address one…">
-        </div>
       </div>
       <div class="grow" style="max-width:330px">
         <div class="panel mb">
@@ -372,8 +368,8 @@
   <p class="label">Join a room</p>
   <p class="muted" style="margin:6px 0 2px">Room code</p>
   <input class="field" id="joinCode" style="width:100%; text-transform:uppercase" maxlength="8" placeholder="A7K2">
-  <p class="muted" style="margin:12px 0 2px">Join key <span class="faint">(only for rooms on remote servers)</span></p>
-  <input class="field" id="joinKey" style="width:100%" placeholder="optional">
+  <p class="muted" style="margin:12px 0 2px">Join key <span class="faint">(auto-filled for rooms this server already trusts you with)</span></p>
+  <input class="field" id="joinKey" style="width:100%" placeholder="from the host's invite">
   <div class="dlg-actions">
     <button class="act" id="joinCancel">Cancel</button>
     <button class="act primary" id="joinGo">Join room</button>
@@ -465,11 +461,12 @@ let lastSeq = 0;
 let roomTab = 'activity';
 let roomFilter = '';
 let roomAgentFilter = '';
-let joined = null;
 
 // ---- watcher socket ---------------------------------------------------------------
 let ws = null;
 let retry = 0;
+let gotFrame = false;
+let protoWatchdog = null;
 
 function connect() {
   setConn('warn', '◌ connecting…');
@@ -482,10 +479,15 @@ function connect() {
       ws.send(JSON.stringify({ type: 'watch_room', code: currentRoom, sinceSeq: lastSeq, key: roomKeys.get(currentRoom), auth: auth() }));
     }
   };
-  ws.onmessage = (m) => handle(JSON.parse(m.data));
+  ws.onmessage = (m) => { gotFrame = true; handle(JSON.parse(m.data)); };
+  clearTimeout(protoWatchdog);
+  gotFrame = false;
+  protoWatchdog = setTimeout(() => {
+    if (!gotFrame) setConn('err', '⚠ server not responding to this dashboard — restart it: collagent dev');
+  }, 4000);
   ws.onclose = () => {
     const delay = Math.min(500 * 2 ** retry++, 8000);
-    setConn(retry > 3 ? 'err' : 'warn', retry > 3 ? '○ offline — retrying' : '◌ reconnecting…');
+    setConn(retry > 3 ? 'err' : 'warn', retry > 3 ? '○ offline — data is stale' : '◌ reconnecting…');
     setTimeout(connect, delay);
   };
 }
@@ -500,11 +502,12 @@ function handle(msg) {
   switch (msg.type) {
     case 'rooms':
       rooms.clear();
-      for (const r of msg.rooms) rooms.set(r.code, r);
+      for (const r of msg.rooms) { rooms.set(r.code, r); if (r.joinKey) roomKeys.set(r.code, r.joinKey); }
       renderRooms(); renderOverviewStats();
       break;
     case 'room_update':
       rooms.set(msg.room.code, msg.room);
+      if (msg.room.joinKey) roomKeys.set(msg.room.code, msg.room.joinKey);
       renderRooms(); renderOverviewStats();
       break;
     case 'room_removed':
@@ -528,6 +531,10 @@ function handle(msg) {
       if (msg.session.code === currentRoom) { roomState = msg.session; renderRoomSide(); renderRoomHeader(); }
       break;
     case 'error':
+      if (/unknown message type/.test(msg.message ?? '')) {
+        setConn('err', '⚠ an old collagent server holds this port — restart it: collagent dev');
+        return;
+      }
       toastError(msg.message);
       break;
   }
@@ -605,9 +612,9 @@ async function refreshOverview() {
 
     const recent = $('ov-recent');
     recent.replaceChildren();
-    const lines = [...ov.recent].reverse().map((e) => timelineLine(e, { withRoom: true })).filter(Boolean);
+    const lines = [...ov.recent].reverse().map((e) => timelineLine(e, { audit: true, withRoom: true })).filter(Boolean);
     if (!lines.length) {
-      recent.appendChild(emptyState('Quiet so far', 'Live activity from every room lands here.'));
+      recent.appendChild(emptyState('Quiet so far', 'Room lifecycle lands here — created, joined, agents, handoffs, failures. Conversations stay inside each room.'));
     } else {
       recent.append(...lines);
       recent.scrollTop = recent.scrollHeight;
@@ -622,9 +629,16 @@ function emptyState(title, body) {
   return box;
 }
 
+function flashBtn(btn, label) {
+  if (btn.dataset.flash) return;
+  btn.dataset.flash = btn.textContent;
+  btn.textContent = label;
+  setTimeout(() => { btn.textContent = btn.dataset.flash; delete btn.dataset.flash; }, 1600);
+}
+
 function feedRecent(event, roomCode) {
   if (!$('view-overview').classList.contains('on')) return;
-  const line = timelineLine({ ...event, roomCode }, { withRoom: true });
+  const line = timelineLine({ ...event, roomCode }, { audit: true, withRoom: true });
   if (!line) return;
   const recent = $('ov-recent');
   recent.querySelector('.empty')?.remove();
@@ -720,8 +734,6 @@ function openRoom(code) {
 function closeRoom() {
   if (!currentRoom) return;
   if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'unwatch_room', code: currentRoom }));
-  joined?.close();
-  joined = null;
   currentRoom = null;
 }
 
@@ -750,15 +762,10 @@ function renderRoomHeader() {
   $('r-topic').textContent = rooms.get(currentRoom ?? '')?.title ?? '';
   $('r-addcmd').textContent = 'collagent add ' + (currentRoom ?? 'CODE') + ' --agent <id>';
 
-  const me = joined?.self;
-  const mine = me && r?.participants?.find((p) => p.id === me.participantId);
-  const canDrive = mine && (mine.role === 'host' || r.driverId === mine.id);
-  $('r-join').textContent = joined ? 'leave' : 'join';
-  $('r-pause').disabled = !canDrive;
-  $('r-pause').textContent = r?.status === 'paused' ? 'resume' : 'pause';
-  $('r-archive').disabled = !(mine?.role === 'host');
-  $('r-end').disabled = !(mine?.role === 'host');
-  $('r-instruct').style.display = joined ? 'block' : 'none';
+
+  const key = roomKeys.get(currentRoom ?? '');
+  $('r-key').style.display = key ? 'inline-block' : 'none';
+  if (key && !$('r-key').dataset.shown) $('r-key').textContent = 'key ••••••';
 }
 
 function renderRoomSide() {
@@ -778,14 +785,6 @@ function renderRoomSide() {
     right.appendChild(a.attached
       ? el('span', a.status === 'working' ? 'dot-warn pulse' : 'dot-ok', '● ' + a.status)
       : el('span', 'dot-idle', '○ detached'));
-    const me = joined?.self;
-    const mine = me && r?.participants?.find((p) => p.id === me.participantId);
-    if (a.attached && mine && (mine.role === 'host' || r.driverId === mine.id)) {
-      const detach = el('button', 'x', ' detach');
-      detach.title = 'detach ' + a.agentId;
-      detach.onclick = () => joined?.control('detach_agent', { target: a.agentId });
-      right.appendChild(detach);
-    }
     cell.appendChild(right);
     agents.appendChild(cell);
     if (a.currentTurnId) {
@@ -871,6 +870,7 @@ const AUDIT_KINDS = new Set([
   'participant_joined', 'participant_left', 'mode_changed', 'handoff_completed',
   'session_paused', 'session_resumed', 'room_archived', 'session_ended',
   'agent_session_created', 'agent_session_attached', 'agent_session_detached', 'session_created',
+  'turn_failed', 'error',
 ]);
 const ACTIVITY_SKIP = new Set(['session_title', 'agent_status', 'result', 'participant_disconnected', 'participant_reconnected']);
 
@@ -975,47 +975,39 @@ function timelineLine(e, { audit = false, withRoom = false } = {}) {
 }
 
 // ---- room controls (real participant protocol) --------------------------------------------
-class Participant {
-  constructor(code) {
-    this.code = code;
-    this.self = null;
-    this.ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-    this.ws.onmessage = (m) => {
-      const msg = JSON.parse(m.data);
-      if (msg.type === 'welcome') { this.self = msg.self; renderRoomHeader(); renderRoomSide(); }
-      if (msg.type === 'error') toastError(msg.message);
-    };
-    this.ws.onopen = () => {
-      this.ws.send(JSON.stringify({ type: 'join', code, name: dashboardName(), key: roomKeys.get(code) ?? null, auth: auth() }));
-    };
-    this.ws.onclose = () => { if (joined === this) { joined = null; renderRoomHeader(); } };
-  }
-  send(obj) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify(obj)); }
-  control(action, extra = {}) { this.send({ type: 'control', action, ...extra }); }
-  close() { try { this.send({ type: 'leave' }); this.ws.close(); } catch { /* gone */ } }
-}
-
-$('r-join').onclick = () => {
-  if (joined) { joined.close(); joined = null; renderRoomHeader(); return; }
-  joined = new Participant(currentRoom);
+$('r-key').onclick = async () => {
+  const key = roomKeys.get(currentRoom ?? '');
+  if (!key) return;
+  const btn = $('r-key');
+  btn.dataset.shown = '1';
+  btn.textContent = 'key ' + key;
+  try { await navigator.clipboard.writeText(key); setConn('ok', '● key copied'); } catch { /* shown is enough */ }
+  btn.textContent = '✓ copied · key ' + key;
+  setTimeout(() => {
+    delete btn.dataset.shown;
+    btn.textContent = 'key ••••••';
+    if (ws?.readyState === 1) setConn('ok', '● connected');
+  }, 4000);
 };
-$('r-pause').onclick = () => joined?.control(roomState?.status === 'paused' ? 'resume' : 'pause');
-$('r-archive').onclick = () => joined?.control('archive');
-$('r-end').onclick = () => { if (confirm('End room ' + currentRoom + ' for everyone?')) joined?.control('end'); };
+$('r-delete').onclick = async () => {
+  const code = currentRoom;
+  if (!code || !confirm('Delete room ' + code + '? It ends for everyone and its history is erased.')) return;
+  try {
+    const res = await fetch('/api/sessions/' + code, { method: 'DELETE' });
+    if (res.ok) { setConn('ok', '● room deleted'); location.hash = '#/rooms'; }
+    else toastError(res.status === 403 ? 'deleting needs the admin token (or run the dashboard on the server itself)' : 'could not delete room ' + code);
+  } catch { toastError('could not reach the server'); }
+};
 $('r-invite').onclick = async () => {
   const key = roomKeys.get(currentRoom);
   const invite = 'collagent join ' + currentRoom + (key ? ' --key ' + key : '');
-  try { await navigator.clipboard.writeText(invite); setConn('ok', '● invite copied'); }
+  try {
+    await navigator.clipboard.writeText(invite);
+    setConn('ok', '● invite copied');
+    flashBtn($('r-invite'), '✓ copied');
+  }
   catch { prompt('Invite command:', invite); }
   setTimeout(() => { if (ws?.readyState === 1) setConn('ok', '● connected'); }, 2000);
-};
-$('r-input').onkeydown = (event) => {
-  if (event.key !== 'Enter') return;
-  const text = $('r-input').value.trim();
-  if (!text || !joined) return;
-  const at = text.match(/^@(\S+)\s+(.+)$/);
-  joined.send({ type: 'instruction', text: at ? at[2] : text, to: at ? at[1] : null });
-  $('r-input').value = '';
 };
 document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
   btn.onclick = () => {
@@ -1056,7 +1048,7 @@ $('createGo').onclick = () => {
   const runtime = document.querySelector('#runtimePick input:checked')?.value ?? 'claude';
   const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   sock.onopen = () => sock.send(JSON.stringify({
-    type: 'create_session', name: dashboardName(), agentType: ADAPTER_OF[runtime], auth: auth(),
+    type: 'create_session', seat: false, agentType: ADAPTER_OF[runtime], auth: auth(),
   }));
   sock.onmessage = (m) => {
     const msg = JSON.parse(m.data);
@@ -1069,8 +1061,8 @@ $('createGo').onclick = () => {
     $('created-cmd').textContent = 'collagent open ' + code + (msg.joinKey ? ' --key ' + msg.joinKey : '');
     $('create-step1').style.display = 'none';
     $('create-step2').style.display = 'block';
-    $('copyCodeBtn').onclick = () => navigator.clipboard?.writeText(code);
-    $('copyInviteBtn').onclick = () => navigator.clipboard?.writeText(invite);
+    $('copyCodeBtn').onclick = () => { navigator.clipboard?.writeText(code); flashBtn($('copyCodeBtn'), '✓ copied'); };
+    $('copyInviteBtn').onclick = () => { navigator.clipboard?.writeText(invite); flashBtn($('copyInviteBtn'), '✓ copied'); };
     $('createDone').onclick = () => {
       $('createDlg').close();
       // Release the seat so the machine running `collagent open` adopts the
@@ -1091,6 +1083,10 @@ $('joinRoomBtn').onclick = () => {
   $('joinCode').focus();
 };
 $('joinCancel').onclick = () => $('joinDlg').close();
+$('joinCode').oninput = () => {
+  const known = roomKeys.get($('joinCode').value.trim().toUpperCase());
+  if (known && !$('joinKey').value) $('joinKey').value = known;
+};
 $('joinGo').onclick = () => {
   const code = $('joinCode').value.trim().toUpperCase();
   if (!code) return;

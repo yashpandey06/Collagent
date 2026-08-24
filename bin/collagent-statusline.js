@@ -15,8 +15,9 @@ process.stdin.on('end', async () => {
       .map((p) => `${p.connected ? '●' : '○'}${p.name}${p.id === s.driverId ? '*' : ''}`)
       .join(' ');
     const mode = s.mode === 'driver' ? ' · driver-mode' : '';
+    const invite = `collagent join ${s.code}${s.joinKey ? ` --key ${s.joinKey}` : ''}`;
     process.stdout.write(
-      `⧉ collagent ${s.code} · ${people} · ${s.status}${mode} ${dim(`· invite: collagent join ${s.code}`)}`,
+      `⧉ collagent ${s.code} · ${people} · ${s.status}${mode} ${dim(`· invite: ${invite}`)}`,
     );
   } catch {
     process.stdout.write(`⧉ collagent ${code} ${dim('(session server unreachable)')}`);

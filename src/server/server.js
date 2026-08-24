@@ -42,7 +42,7 @@ export function createCollagentServer({
   dataDir,
   databaseUrl,
   log = () => {},
-  requireJoinKey = envBool(process.env.COLLAGENT_REQUIRE_JOIN_KEY) ?? 'auto',
+  requireJoinKey = envBool(process.env.COLLAGENT_REQUIRE_JOIN_KEY) ?? true,
   requireAuth = envBool(process.env.COLLAGENT_REQUIRE_AUTH) ?? 'auto',
   joinRateLimit = 30,
   httpRateLimit = 240,
@@ -80,7 +80,23 @@ export function createCollagentServer({
     ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress
     : req.socket.remoteAddress) ?? '';
 
+  function originAllowed(origin) {
+    if (!origin) return true;
+    try {
+      const { hostname } = new URL(origin);
+      if (['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname)) return true;
+    } catch {
+      return false;
+    }
+    return corsOrigins.includes('*') || corsOrigins.includes(origin);
+  }
+
   wss.on('connection', (ws, req) => {
+    if (!originAllowed(req.headers.origin)) {
+      log('rejected ws from foreign origin', { origin: req.headers.origin });
+      ws.close(1008, 'origin not allowed');
+      return;
+    }
     ws._ctx = { role: null, code: null, participantId: null, agentId: null };
     ws._remote = remoteOf(req);
     ws.isAlive = true;
@@ -241,7 +257,7 @@ export function createCollagentServer({
       const includeArchived = url.searchParams.get('archived') === '1';
       const rooms = sessions
         .filter((s) => s.lifecycle !== 'archived' || includeArchived)
-        .map((s) => s.summary())
+        .map((s) => summaryWithKey(s))
         .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
       return json(200, rooms);
     }
@@ -284,7 +300,7 @@ export function createCollagentServer({
 
       switch (sub) {
         case '':
-          return json(200, session.summary());
+          return json(200, httpAuthorized(req) ? summaryWithKey(session) : session.summary());
         case '/agents':
           return json(200, [...session.agentSessions.values()].map((a) => a.toJSON()));
         case '/events': {
@@ -419,10 +435,12 @@ export function createCollagentServer({
     send(ws, { type: 'rooms', rooms: visibleRooms(ws) });
   }
 
+  const summaryWithKey = (session) => ({ ...session.summary(), joinKey: session.joinKey });
+
   function visibleRooms(ws) {
     return manager.list()
       .filter((s) => !ws._scope || ws._scope.has(s.code))
-      .map((s) => s.summary())
+      .map((s) => summaryWithKey(s))
       .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
   }
 
@@ -462,7 +480,7 @@ export function createCollagentServer({
 
   function notifyWatchers(session) {
     if (!listWatchers.size) return;
-    const summary = session.summary();
+    const summary = summaryWithKey(session);
     for (const ws of listWatchers) {
       if (ws._scope && !ws._scope.has(session.code)) continue;
       send(ws, { type: 'room_update', room: summary });
@@ -495,7 +513,7 @@ export function createCollagentServer({
   const AUTH_HINT = 'authentication required — register once: POST /api/auth/register {"name":"you"} and pass the token';
 
   async function onCreateSession(ws, msg) {
-    const { name = 'host', agentType = 'unknown', userId = null, workspaceId = null } = msg;
+    const { name = 'host', agentType = 'unknown', userId = null, workspaceId = null, seat = true } = msg;
     if (overLimit('join', ws._remote, joinRateLimit)) {
       return send(ws, { type: 'error', message: 'rate limited — try again shortly' });
     }
@@ -512,25 +530,28 @@ export function createCollagentServer({
         : personal;
     }
     const agent = session.addAgentSession({ adapterType: agentType });
-    const p = session.addParticipant({ name: sanitizeName(name) || 'host', role: 'host', userId: user?.id ?? userId });
-    agent.hostId = p.id;
-    registerParticipant(ws, session, p);
+    let p = null;
+    if (seat) {
+      p = session.addParticipant({ name: sanitizeName(name) || 'host', role: 'host', userId: user?.id ?? userId });
+      agent.hostId = p.id;
+      registerParticipant(ws, session, p);
+    }
     session.append('agent_session_created', sysActor(), { runtime: agent.runtime, adapterType: agentType },
       agentCtx(agent));
-    broadcastEvent(session, session.append('participant_joined', userActor(p), { role: p.role }));
+    if (p) broadcastEvent(session, session.append('participant_joined', userActor(p), { role: p.role }));
     manager.saveMeta(session);
 
     send(ws, {
       type: 'session_created',
       session: session.toJSON(),
-      self: selfPayload(p),
+      ...(p ? { self: selfPayload(p) } : {}),
       joinKey: session.joinKey,
       agentToken: agent.agentToken,
       agent: { agentId: agent.agentId, agentSessionId: agent.id },
       events: session.log.since(0),
     });
     broadcastSession(session);
-    log(`session ${session.code} created by ${p.name}`);
+    log(`session ${session.code} created by ${p?.name ?? 'the dashboard (no seat)'}`);
   }
 
   async function onJoin(ws, msg) {
@@ -778,6 +799,11 @@ export function createCollagentServer({
       target ? { agentId: target.agentId, agentSessionId: target.id } : {});
     broadcastEvent(session, event);
 
+    const online = [...session.participants.values()].filter((p) => p.connected).length;
+    const sender = online > 1
+      ? { id: participant.id, name: participant.name }
+      : { id: participant.id };
+
     const agentWs = target && agentConns.get(session.code)?.get(target.agentId);
     if (!agentWs || agentWs.readyState !== agentWs.OPEN) {
       if (session.pending.length >= PENDING_LIMIT) {
@@ -785,7 +811,7 @@ export function createCollagentServer({
           message: 'no agent attached and the queue is full — attach an agent first',
         }));
       }
-      session.pending.push({ text, from: { id: participant.id, name: participant.name }, eventSeq: event.seq, to: target?.agentId ?? null });
+      session.pending.push({ text, from: sender, eventSeq: event.seq, to: target?.agentId ?? null });
       broadcastEvent(session, session.append('notice', sysActor(), {
         message: `${target ? target.agentId + ' is' : 'no agent'} not attached — instruction queued (${session.pending.length}). It is delivered when an agent attaches (collagent open ${session.code}).`,
       }));
@@ -799,7 +825,7 @@ export function createCollagentServer({
     send(agentWs, {
       type: 'instruction',
       text,
-      from: { id: participant.id, name: participant.name },
+      from: sender,
       eventSeq: event.seq,
     });
   }
